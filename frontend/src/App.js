@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import "./App.css";
 import { Line } from "react-chartjs-2";
 import {
@@ -10,6 +10,7 @@ import {
   Tooltip,
   Legend,
 } from "chart.js";
+import { FiHome, FiBarChart2, FiUsers, FiActivity } from "react-icons/fi";
 
 ChartJS.register(
   LineElement,
@@ -20,120 +21,132 @@ ChartJS.register(
   Legend
 );
 
-const API_URL = "http://127.0.0.1:9000";
+const API_URL = "http://127.0.0.1:8000";
 
 function App() {
-  const [apiKey, setApiKey] = useState("");
-  const [connected, setConnected] = useState(false);
-  const [darkMode, setDarkMode] = useState(true);
   const [metrics, setMetrics] = useState(null);
   const [history, setHistory] = useState([]);
+  const [rateHistory, setRateHistory] = useState([]);
+  const [section, setSection] = useState("dashboard");
   const [health, setHealth] = useState(null);
-  const [error, setError] = useState(null);
+  const [connected, setConnected] = useState(true);
+  const [apiKey, setApiKey] = useState(null);
 
-  // -----------------------------------------
+  // ✅ NEW STATES (only additions)
+  const [trafficVolume, setTrafficVolume] = useState(20);
+  const [adminMode, setAdminMode] = useState(false);
+
+  const prevRequests = useRef(0);
+
+  // -------------------------
+  // Auto Create API Key
+  // -------------------------
+  const createApiKey = async () => {
+    const res = await fetch(`${API_URL}/register`, { method: "POST" });
+    const data = await res.json();
+    setApiKey(data.api_key);
+  };
+
+  // -------------------------
+  // Generate Traffic
+  // -------------------------
+  const generateTraffic = async () => {
+    if (!apiKey) return;
+
+    for (let i = 0; i < trafficVolume; i++) {
+      try {
+        await fetch(`${API_URL}/`, {
+          headers: {
+            "x-api-key": apiKey,
+            "x-admin-mode": adminMode ? "true" : "false",
+          },
+        });
+      } catch (err) {
+        console.log("Traffic request blocked");
+      }
+    }
+  };
+
+  const resetRateLimit = async () => {
+    if (!apiKey) {
+      console.log("No API key");
+      return;
+    }
+  
+    console.log("Sending reset request with key:", apiKey);
+  
+    try {
+      const res = await fetch(`${API_URL}/reset-rate-limit`, {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "x-admin-mode": "true",
+        },
+      });
+  
+      const data = await res.json();
+      console.log("Reset response:", data);
+    } catch (err) {
+      console.log("Reset failed:", err);
+    }
+  };
+
+  // -------------------------
   // Fetch Metrics
-  // -----------------------------------------
+  // -------------------------
   const fetchMetrics = async () => {
     try {
-      const res = await fetch(`${API_URL}/metrics`, {
-        headers: { "x-api-key": apiKey },
-      });
-
-      if (!res.ok) {
-        const err = await res.json();
-        setError(err.detail || "Invalid API key");
-        setConnected(false);
-        return;
-      }
-
+      const res = await fetch(`${API_URL}/metrics`);
       const data = await res.json();
+
+      const rps = data.total_requests - prevRequests.current;
+      prevRequests.current = data.total_requests;
+
       setMetrics(data);
-      setError(null);
 
       setHistory((prev) => [
-        ...prev.slice(-19),
+        ...prev.slice(-29),
         {
           time: new Date().toLocaleTimeString(),
           requests: data.total_requests,
-          rateLimited: data.rate_limited_requests,
         },
       ]);
-    } catch (err) {
-      console.error("Metrics fetch error:", err);
-      setError("Server not reachable");
-    }
-  };
 
-  // -----------------------------------------
-  // Fetch Health
-  // -----------------------------------------
-  const fetchHealth = async () => {
-    try {
-      const res = await fetch(`${API_URL}/health`);
-      const data = await res.json();
-      setHealth(data);
+      setRateHistory((prev) => [
+        ...prev.slice(-29),
+        {
+          time: new Date().toLocaleTimeString(),
+          rateLimited: data.rate_limited_requests,
+          rps: rps,
+        },
+      ]);
+
+      setConnected(true);
     } catch {
-      setHealth({ status: "down" });
+      setConnected(false);
     }
   };
 
-  // -----------------------------------------
-  // Polling
-  // -----------------------------------------
+  const fetchHealth = async () => {
+    const res = await fetch(`${API_URL}/health`);
+    const data = await res.json();
+    setHealth(data);
+  };
+
   useEffect(() => {
-    if (connected) {
+    createApiKey();
+    fetchMetrics();
+    fetchHealth();
+    const interval = setInterval(() => {
       fetchMetrics();
       fetchHealth();
-
-      const interval = setInterval(() => {
-        fetchMetrics();
-        fetchHealth();
-      }, 2000);
-
-      return () => clearInterval(interval);
-    }
-  }, [connected]);
-
-  // -----------------------------------------
-  // Login Screen
-  // -----------------------------------------
-  if (!connected) {
-    return (
-      <div className="login-container">
-        <h1>Enter API Key</h1>
-
-        {error && <p className="error">{error}</p>}
-
-        <input
-          placeholder="Paste API Key here"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-        />
-
-        <button
-          onClick={() => {
-            if (!apiKey.trim()) {
-              setError("Please enter API key");
-              return;
-            }
-            setHistory([]);
-            setMetrics(null);
-            setConnected(true);
-          }}
-        >
-          Connect
-        </button>
-      </div>
-    );
-  }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, []);
 
   if (!metrics) return <div className="loading">Loading...</div>;
 
-  // -----------------------------------------
-  // Chart Data
-  // -----------------------------------------
-  const chartData = {
+  const trafficChart = {
     labels: history.map((h) => h.time),
     datasets: [
       {
@@ -141,77 +154,181 @@ function App() {
         data: history.map((h) => h.requests),
         borderColor: "#4F9DFF",
         backgroundColor: "rgba(79,157,255,0.2)",
-        tension: 0.3,
-      },
-      {
-        label: "Rate Limited",
-        data: history.map((h) => h.rateLimited),
-        borderColor: "#FF4D4D",
-        backgroundColor: "rgba(255,77,77,0.2)",
-        tension: 0.3,
+        tension: 0.4,
+        fill: true,
       },
     ],
   };
 
-  // -----------------------------------------
-  // Dashboard UI
-  // -----------------------------------------
+  const rateChart = {
+    labels: rateHistory.map((h) => h.time),
+    datasets: [
+      {
+        label: "Rate Limited",
+        data: rateHistory.map((h) => h.rateLimited),
+        borderColor: "#FF4D4D",
+        backgroundColor: "rgba(255,77,77,0.2)",
+        tension: 0.4,
+        fill: true,
+      },
+    ],
+  };
+
   return (
-    <div className={darkMode ? "app dark" : "app"}>
-      <header>
-        <h1>API Gateway Dashboard</h1>
-        <div>
-          <button onClick={() => setDarkMode(!darkMode)}>
-            {darkMode ? "Light Mode ☀️" : "Dark Mode 🌙"}
-          </button>
-          <button
-            style={{ marginLeft: "10px" }}
-            onClick={() => {
-              setConnected(false);
-              setApiKey("");
-            }}
-          >
-            Logout
-          </button>
+    <div className="app dark">
+      <div className="sidebar">
+        <div className="logo">AG</div>
+
+        <SidebarItem
+          icon={<FiHome />}
+          label="Dashboard"
+          active={section === "dashboard"}
+          onClick={() => setSection("dashboard")}
+        />
+        <SidebarItem
+          icon={<FiBarChart2 />}
+          label="Metrics"
+          active={section === "metrics"}
+          onClick={() => setSection("metrics")}
+        />
+        <SidebarItem
+          icon={<FiUsers />}
+          label="Clients"
+          active={section === "clients"}
+          onClick={() => setSection("clients")}
+        />
+        <SidebarItem
+          icon={<FiActivity />}
+          label="Health"
+          active={section === "health"}
+          onClick={() => setSection("health")}
+        />
+      </div>
+
+      <div className="main">
+        <div className="live-indicator">
+          <span className={connected ? "dot online" : "dot offline"}></span>
+          {connected ? "Live" : "Disconnected"}
         </div>
-      </header>
 
-      <div className="cards">
-        <MetricCard title="Total Requests" value={metrics.total_requests} />
-        <MetricCard
-          title="Rate Limited"
-          value={metrics.rate_limited_requests}
-          alert={metrics.rate_limited_requests > 0}
-        />
-        <MetricCard
-          title="Avg Latency (ms)"
-          value={metrics.average_latency_ms}
-        />
-        <MetricCard
-          title="P95 Latency (ms)"
-          value={metrics.p95_latency_ms}
-        />
-      </div>
+        {section === "dashboard" && (
+          <>
+            <h1>Dashboard</h1>
 
-      <div className="chart-container">
-        <Line data={chartData} />
-      </div>
+            <div style={{ marginBottom: "20px" }}>
+              <button onClick={generateTraffic}>
+                Generate Traffic
+              </button>
 
-      <div className="health">
-        <span>System Status:</span>
-        {health?.status === "healthy" ? (
-          <span className="status-ok"> ● Healthy</span>
-        ) : (
-          <span className="status-down"> ● Down</span>
+              <button
+                onClick={resetRateLimit}
+                style={{ marginLeft: "10px" }}
+              >
+                Reset Rate Limit
+              </button>
+
+              <div style={{ marginTop: "15px" }}>
+                <label>Traffic Volume: {trafficVolume}</label>
+                <input
+                  type="range"
+                  min="1"
+                  max="200"
+                  value={trafficVolume}
+                  onChange={(e) =>
+                    setTrafficVolume(Number(e.target.value))
+                  }
+                />
+              </div>
+
+              <div style={{ marginTop: "10px" }}>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={adminMode}
+                    onChange={() => setAdminMode(!adminMode)}
+                  />
+                  Admin Mode (Bypass Rate Limit)
+                </label>
+              </div>
+            </div>
+
+            <div className="cards">
+              <MetricCard title="Total Requests" value={metrics.total_requests} />
+              <MetricCard
+                title="Requests Per 2s"
+                value={rateHistory.length ? rateHistory.at(-1).rps : 0}
+              />
+              <MetricCard
+                title="Rate Limited"
+                value={metrics.rate_limited_requests}
+                danger={metrics.rate_limited_requests > 0}
+              />
+              <MetricCard
+                title="P95 Latency"
+                value={metrics.p95_latency_ms}
+                danger={metrics.p95_latency_ms > 200}
+              />
+            </div>
+          </>
+        )}
+
+        {section === "metrics" && (
+          <>
+            <h1>Traffic</h1>
+            <div className="chart-container">
+              <Line data={trafficChart} />
+            </div>
+
+            <h2 style={{ marginTop: "30px" }}>Rate Limit Spikes</h2>
+            <div className="chart-container">
+              <Line data={rateChart} />
+            </div>
+          </>
+        )}
+
+        {section === "clients" && (
+          <>
+            <h1>Client Usage</h1>
+            {Object.entries(metrics.client_usage).length === 0 ? (
+              <p>No client traffic recorded.</p>
+            ) : (
+              Object.entries(metrics.client_usage).map(([key, value]) => (
+                <div key={key} className="client-row">
+                  <span>{key.slice(0, 8)}...</span>
+                  <span>{value} requests</span>
+                </div>
+              ))
+            )}
+          </>
+        )}
+
+        {section === "health" && (
+          <>
+            <h1>System Health</h1>
+            <p>Status: {health?.status}</p>
+            <p>Redis Connected: {health?.redis_connected ? "Yes" : "No"}</p>
+          </>
         )}
       </div>
     </div>
   );
 }
 
-function MetricCard({ title, value, alert }) {
+function SidebarItem({ icon, label, active, onClick }) {
   return (
-    <div className={`card ${alert ? "card-alert" : ""}`}>
+    <div
+      className={`sidebar-item ${active ? "active" : ""}`}
+      onClick={onClick}
+    >
+      <span className="icon">{icon}</span>
+      <span className="label">{label}</span>
+    </div>
+  );
+}
+
+function MetricCard({ title, value, danger }) {
+  return (
+    <div className={`card ${danger ? "danger" : ""}`}>
       <h3>{title}</h3>
       <p>{value}</p>
     </div>

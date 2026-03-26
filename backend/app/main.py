@@ -10,26 +10,29 @@ import redis
 import os
 import socket
 
-# --------------------------------------------------
+
+# -------------------------------------------------
 # FastAPI App
 # --------------------------------------------------
 
 app = FastAPI(title="Distributed API Gateway")
 
-# --------------------------------------------------
-# CORS
-# --------------------------------------------------
 
+# --------------------------------------------------
+# CORS (LOCAL DEVELOPMENT SAFE)
+# --------------------------------------------------
+ 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],  # allow all in dev
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
 # --------------------------------------------------
-# Redis Setup (Docker Safe)
+# Redis Setup
 # --------------------------------------------------
 
 redis_client = redis.Redis(
@@ -38,11 +41,13 @@ redis_client = redis.Redis(
     decode_responses=True
 )
 
+
 # --------------------------------------------------
 # SQLite Setup
 # --------------------------------------------------
 
 DB_PATH = "traffic.db"
+
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -60,13 +65,16 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 init_db()
 
+
 # --------------------------------------------------
-# API Key Storage (In-memory)
+# In-memory API Keys
 # --------------------------------------------------
 
 api_keys = {}
+
 
 # --------------------------------------------------
 # Rate Limiting Config
@@ -75,8 +83,9 @@ api_keys = {}
 RATE_LIMIT = 10
 WINDOW_SIZE = 60
 
+
 # --------------------------------------------------
-# Metrics
+# Metrics Store
 # --------------------------------------------------
 
 traffic_metrics = {
@@ -89,7 +98,8 @@ traffic_metrics = {
     "latencies": []
 }
 
-MAX_LATENCY_STORE = 1000  # prevent memory leak
+MAX_LATENCY_STORE = 1000
+
 
 # --------------------------------------------------
 # Helper: Log to SQLite
@@ -111,8 +121,9 @@ def log_traffic(api_key, endpoint, latency_ms, rate_limited):
     conn.commit()
     conn.close()
 
+
 # --------------------------------------------------
-# Middleware
+# Intelligent Gateway Middleware
 # --------------------------------------------------
 
 @app.middleware("http")
@@ -134,7 +145,7 @@ async def intelligent_gateway(request: Request, call_next):
     traffic_metrics["endpoint_hits"][endpoint] += 1
 
     # ------------------------
-    # PUBLIC ROUTES
+    # Public Routes
     # ------------------------
 
     if endpoint in public_routes:
@@ -145,7 +156,7 @@ async def intelligent_gateway(request: Request, call_next):
         return response
 
     # ------------------------
-    # API KEY VALIDATION
+    # API Key Validation
     # ------------------------
 
     api_key = request.headers.get("x-api-key")
@@ -159,7 +170,7 @@ async def intelligent_gateway(request: Request, call_next):
     traffic_metrics["client_usage"][api_key] += 1
 
     # ------------------------
-    # RATE LIMITING (Redis)
+    # Rate Limiting
     # ------------------------
 
     redis_key = f"rate_limit:{api_key}:{endpoint}"
@@ -177,12 +188,12 @@ async def intelligent_gateway(request: Request, call_next):
         pipe.expire(redis_key, WINDOW_SIZE)
         pipe.execute()
 
-    except redis.exceptions.ConnectionError:
-        # If Redis fails, allow request but log error
+    except Exception:
+        # Redis down — allow request but record error
         traffic_metrics["server_errors"] += 1
 
     # ------------------------
-    # PROCESS REQUEST
+    # Process Request
     # ------------------------
 
     response = await call_next(request)
@@ -200,6 +211,7 @@ async def intelligent_gateway(request: Request, call_next):
 
     return response
 
+
 # --------------------------------------------------
 # Register API Key
 # --------------------------------------------------
@@ -212,8 +224,9 @@ def register_client():
     }
     return {"api_key": new_key}
 
+
 # --------------------------------------------------
-# Protected Route
+# Protected Root Route
 # --------------------------------------------------
 
 @app.get("/")
@@ -222,6 +235,7 @@ def root():
         "message": "API Gateway Running",
         "container": socket.gethostname()
     }
+
 
 # --------------------------------------------------
 # Health Endpoint
@@ -239,6 +253,7 @@ def health():
         "redis_connected": redis_status,
         "active_api_keys": len(api_keys)
     }
+
 
 # --------------------------------------------------
 # Metrics Endpoint
