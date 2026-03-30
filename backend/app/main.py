@@ -9,6 +9,7 @@ import sqlite3
 import redis
 import os
 import socket
+import re
 
 
 # -------------------------------------------------
@@ -19,12 +20,12 @@ app = FastAPI(title="Distributed API Gateway")
 
 
 # --------------------------------------------------
-# CORS (LOCAL DEVELOPMENT SAFE)
+# CORS
 # --------------------------------------------------
- 
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # allow all in dev
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -156,13 +157,19 @@ async def intelligent_gateway(request: Request, call_next):
         return response
 
     # ------------------------
-    # API Key Validation
+    # API Key Validation (IMPROVED)
     # ------------------------
 
     api_key = request.headers.get("x-api-key")
 
     if not api_key:
         return JSONResponse(status_code=401, content={"detail": "Missing API key"})
+
+    # UUID format validation
+    uuid_pattern = re.compile(r'^[a-f0-9\-]{36}$')
+
+    if not uuid_pattern.match(api_key):
+        return JSONResponse(status_code=400, content={"detail": "Invalid API key format"})
 
     if api_key not in api_keys:
         return JSONResponse(status_code=403, content={"detail": "Invalid API key"})
@@ -181,7 +188,10 @@ async def intelligent_gateway(request: Request, call_next):
         if current_count and int(current_count) >= RATE_LIMIT:
             traffic_metrics["rate_limited_requests"] += 1
             log_traffic(api_key, endpoint, 0, 1)
-            return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Rate limit exceeded"}
+            )
 
         pipe = redis_client.pipeline()
         pipe.incr(redis_key)
@@ -189,8 +199,11 @@ async def intelligent_gateway(request: Request, call_next):
         pipe.execute()
 
     except Exception:
-        # Redis down — allow request but record error
         traffic_metrics["server_errors"] += 1
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Service temporarily unavailable"}
+        )
 
     # ------------------------
     # Process Request
