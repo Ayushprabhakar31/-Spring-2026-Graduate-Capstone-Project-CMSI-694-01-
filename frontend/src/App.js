@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
-import Dashboard from "./Dashboard";
+import HomeScreen from "./HomeScreen";
 import ExecutiveSuite from "./ExecutiveSuite";
 import PromptStudio from "./PromptStudio";
 import SystemBlueprint from "./SystemBlueprint";
@@ -300,7 +300,18 @@ function App() {
             </div>
           </header>
 
-          {page === "command" ? <Dashboard /> : null}
+          {page === "command" ? (
+            <HomeScreen
+              session={session}
+              auditRows={auditRows}
+              notifications={notifications}
+              onNavigate={setPage}
+              onOpenPalette={() => setPaletteOpen(true)}
+              onOpenActivity={() => setNotificationsOpen(true)}
+              onToggleViewMode={() => setViewMode((current) => (current === "operator" ? "presentation" : "operator"))}
+              viewMode={viewMode}
+            />
+          ) : null}
           {page === "war-room" ? <WarRoom /> : null}
           {page === "studio" ? <PromptStudio /> : null}
           {page === "chat" ? <ChatWorkspace /> : null}
