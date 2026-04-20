@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: pulseops-backend
+    runtime: node
+    rootDir: backend/src
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-5-mini
+      - key: PUBLIC_BASE_URL
+        fromService:
+          type: web
+          name: pulseops-backend
+          envVarKey: RENDER_EXTERNAL_URL
+
+  - type: web
+    name: pulseops-frontend
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: build
+    envVars:
+      - key: REACT_APP_API_BASE
+        fromService:
+          type: web
+          name: pulseops-backend
+          envVarKey: RENDER_EXTERNAL_URL
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

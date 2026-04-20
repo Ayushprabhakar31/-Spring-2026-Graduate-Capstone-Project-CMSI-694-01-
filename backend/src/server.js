@@ -10,6 +10,7 @@ const REDIS_PORT = parseInt(process.env.REDIS_PORT || "6379", 10);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
 const ENABLE_REDIS = process.env.ENABLE_REDIS === "true";
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 
 const app = express();
 app.use(cors());
@@ -258,8 +259,13 @@ function createSite(name, domain) {
   return site;
 }
 
-function buildSiteSnippet(site) {
-  return `<!-- PulseOps website monitor -->\n<script src="http://localhost:${PORT}/sdk/pulseops.js"></script>\n<script>\n  window.PulseOps.init({\n    siteKey: "${site.siteKey}",\n    apiKey: "${site.apiKey}",\n    collectorUrl: "http://localhost:${PORT}/api/collect"\n  });\n  window.PulseOps.trackPageView();\n</script>`;
+function getBaseUrl(req) {
+  if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL;
+  return `${req.protocol}://${req.get("host")}`;
+}
+
+function buildSiteSnippet(site, baseUrl) {
+  return `<!-- PulseOps website monitor -->\n<script src="${baseUrl}/sdk/pulseops.js"></script>\n<script>\n  window.PulseOps.init({\n    siteKey: "${site.siteKey}",\n    apiKey: "${site.apiKey}",\n    collectorUrl: "${baseUrl}/api/collect"\n  });\n  window.PulseOps.trackPageView();\n</script>`;
 }
 
 ensureSeedData();
@@ -1282,9 +1288,79 @@ function buildSnapshot() {
   return snapshot;
 }
 
+function buildHomeSummary(snapshot = buildSnapshot()) {
+  const serviceWarningCount = (snapshot.serviceHealth || []).filter((item) => item.status !== "healthy").length;
+  const priorityAlert = snapshot.alertCenter?.[0];
+  const leadBriefing = snapshot.roleBriefings?.[0];
+  const recentAudit = (snapshot.auditTrail || []).slice(0, 4).map((entry) => ({
+    id: entry.id,
+    title: entry.action,
+    detail: entry.detail,
+    meta: `${entry.actor || "system"} · ${new Date(entry.ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`,
+  }));
+
+  return {
+    ts: Date.now(),
+    headline: "AI-native security operations",
+    hero: {
+      title: "PulseOps turns live telemetry into decisions, narratives, and action.",
+      detail: "The home API packages real-time system posture into a clean entry experience for operators, judges, and external users.",
+      nextBestMove: priorityAlert?.title || "Lead with the AI analyst, then pivot into analytics and exports.",
+      nextBestMoveDetail: priorityAlert?.detail || "Start with the strongest live signal, then use analytics and exports to turn that state into a polished story.",
+    },
+    stats: [
+      { label: "Active Modules", value: "14", detail: "AI, security, analytics, exports, and demo tools" },
+      { label: "Live Signals", value: String((snapshot.auditTrail || []).length).padStart(2, "0"), detail: "Recent audit and platform activity" },
+      { label: "Threat Score", value: String(snapshot.threatScore || 0), detail: `${snapshot.scenarioLabel || "Normal Ops"} scenario posture` },
+      { label: "Current RPS", value: String(snapshot.totals?.currentRps || 0), detail: "Real-time request flow from the live stream" },
+    ],
+    feed: recentAudit.length ? recentAudit : (snapshot.alertCenter || []).slice(0, 4).map((item, index) => ({
+      id: item.id || `alert-${index}`,
+      title: item.title,
+      detail: item.detail,
+      meta: `${item.tone || "info"} · live`,
+    })),
+    modules: [
+      { id: "security", eyebrow: "AI Analyst", title: "Explain threats, not just metrics", copy: "Turn anomalies into likely root cause, active risk, and suggested response guidance.", cta: "Open Security Analyst", tone: "info" },
+      { id: "chat", eyebrow: "Conversational UX", title: "Ask the platform what matters right now", copy: "Use the same live telemetry in a natural-language workspace for incidents, impact, and next actions.", cta: "Open Chat Workspace", tone: "success" },
+      { id: "analytics", eyebrow: "Executive Readout", title: "Move from live ops into decision-grade insight", copy: "Translate system state into trends, business framing, and higher-level risk discussion.", cta: "Open Analytics Hub", tone: "warning" },
+    ],
+    launchpad: [
+      { id: "war-room", label: "War Room", text: "Coordinate response, next steps, and briefings.", accent: "danger" },
+      { id: "studio", label: "Prompt Studio", text: "Design reusable AI prompts for the demo and operations.", accent: "violet" },
+      { id: "sites", label: "Website Monitor", text: "Show live data capture and monitoring credibility.", accent: "info" },
+      { id: "coach", label: "Presentation Coach", text: "Tighten your story, Q&A, and final demo flow.", accent: "success" },
+      { id: "atlas", label: "Threat Atlas", text: "Bring a sharper visual signature to your security story.", accent: "warning" },
+      { id: "exports", label: "Export Center", text: "Package the narrative as polished artifacts and reports.", accent: "info" },
+    ],
+    status: {
+      scenario: snapshot.scenarioLabel,
+      currentRps: snapshot.totals?.currentRps || 0,
+      avgLatency: snapshot.totals?.avgLatency || 0,
+      serviceWarnings: serviceWarningCount,
+      copilotPrompt: leadBriefing?.summary || "Ask the AI analyst for the highest-risk issue and recommended next steps.",
+    },
+  };
+}
+
 function broadcast(event, data) {
   const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   sseClients.forEach((response) => response.write(message));
+}
+
+function attachRealtimeClient(req, res, eventName, payload) {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  res.write("event: connected\ndata: {}\n\n");
+  res.write(`event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`);
+  sseClients.add(res);
+
+  req.on("close", () => {
+    sseClients.delete(res);
+  });
 }
 
 function recordRequest(request) {
@@ -1606,6 +1682,7 @@ function flushMetrics() {
   ).run();
 
   broadcast("snapshot", snapshot);
+  broadcast("home", buildHomeSummary(snapshot));
 }
 
 setInterval(flushMetrics, 1000);
@@ -1676,6 +1753,10 @@ app.get("/sdk/pulseops.js", (req, res) => {
 
 app.get("/api/dashboard/snapshot", (req, res) => {
   res.json(buildSnapshot());
+});
+
+app.get("/api/home/summary", (req, res) => {
+  res.json(buildHomeSummary());
 });
 
 app.get("/api/metrics", (req, res) => {
@@ -1753,11 +1834,12 @@ app.post("/api/sites/register", (req, res) => {
   }
 
   const site = createSite(name, domain);
+  const baseUrl = getBaseUrl(req);
   logAudit("site.registered", `${site.name} (${site.domain})`);
   return res.status(201).json({
     site,
-    snippet: buildSiteSnippet(site),
-    collectorUrl: `http://localhost:${PORT}/api/collect`,
+    snippet: buildSiteSnippet(site, baseUrl),
+    collectorUrl: `${baseUrl}/api/collect`,
   });
 });
 
@@ -1771,10 +1853,11 @@ app.post("/api/sites/:siteKey/rotate-key", (req, res) => {
   db.prepare("UPDATE sites SET api_key = ? WHERE site_key = ?").run(apiKey, site.siteKey);
   syncSitesFromDb();
   const updated = state.sites.find((item) => item.siteKey === site.siteKey);
+  const baseUrl = getBaseUrl(req);
   logAudit("site.api-key-rotated", updated.name);
   return res.json({
     site: updated,
-    snippet: buildSiteSnippet(updated),
+    snippet: buildSiteSnippet(updated, baseUrl),
   });
 });
 
@@ -1784,10 +1867,11 @@ app.get("/api/sites/:siteKey/snippet", (req, res) => {
     return res.status(404).json({ error: "site not found" });
   }
 
+  const baseUrl = getBaseUrl(req);
   return res.json({
     site,
-    snippet: buildSiteSnippet(site),
-    collectorUrl: `http://localhost:${PORT}/api/collect`,
+    snippet: buildSiteSnippet(site, baseUrl),
+    collectorUrl: `${baseUrl}/api/collect`,
   });
 });
 
@@ -2051,18 +2135,11 @@ app.post("/api/collect", (req, res) => {
 });
 
 app.get("/api/metrics/realtime", (req, res) => {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
+  attachRealtimeClient(req, res, "snapshot", buildSnapshot());
+});
 
-  res.write("event: connected\ndata: {}\n\n");
-  res.write(`event: snapshot\ndata: ${JSON.stringify(buildSnapshot())}\n\n`);
-  sseClients.add(res);
-
-  req.on("close", () => {
-    sseClients.delete(res);
-  });
+app.get("/api/home/realtime", (req, res) => {
+  attachRealtimeClient(req, res, "home", buildHomeSummary());
 });
 
 app.post("/api/insights", async (req, res) => {
