@@ -11,6 +11,7 @@ test("renders command center heading", async () => {
     }),
   );
   render(<App />);
-  expect(screen.getByText(/PulseOps Command Center/i)).toBeInTheDocument();
-  expect((await screen.findAllByText(/Normal Ops/i)).length).toBeGreaterThan(0);
+  expect(await screen.findByRole("heading", { name: /Command Center/i })).toBeInTheDocument();
+  expect(screen.getByText(/Mission Control/i)).toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: /Quick Actions/i }).length).toBeGreaterThan(0);
 });

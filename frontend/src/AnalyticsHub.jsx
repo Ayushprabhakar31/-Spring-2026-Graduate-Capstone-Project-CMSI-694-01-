@@ -1,43 +1,44 @@
 import { useEffect, useState } from "react";
-
-const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:9000";
+import * as api from "./services/api";
+import useSites from "./hooks/useSites";
+import { SkeletonCard, SkeletonPanel } from "./components/Skeleton";
 
 export default function AnalyticsHub() {
-  const [sites, setSites] = useState([]);
+  const { sites } = useSites();
   const [siteKey, setSiteKey] = useState("global");
-  const [history, setHistory] = useState({ rows: [], trends: {}, anomalyScore: 0 });
+  const [history, setHistory] = useState(null);
   const [comparison, setComparison] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    async function loadSites() {
-      try {
-        const response = await fetch(`${API_BASE}/api/sites`);
-        if (!response.ok) return;
-        const data = await response.json();
-        setSites(Array.isArray(data.rows) ? data.rows : []);
-      } catch (error) {
-        // local fallback
-      }
-    }
+    let cancelled = false;
 
-    loadSites();
-  }, []);
-
-  useEffect(() => {
     async function loadAnalytics() {
       try {
-        const [historyResponse, comparisonResponse] = await Promise.all([
-          fetch(`${API_BASE}/api/history/overview?siteKey=${encodeURIComponent(siteKey)}`),
-          fetch(`${API_BASE}/api/history/incidents/compare`),
+        const [historyData, comparisonData] = await Promise.all([
+          api.getHistoryOverview(siteKey),
+          api.getIncidentComparison(),
         ]);
-        if (historyResponse.ok) setHistory(await historyResponse.json());
-        if (comparisonResponse.ok) setComparison(await comparisonResponse.json());
-      } catch (error) {
-        // local fallback
+        if (!cancelled) {
+          setHistory(historyData);
+          setComparison(comparisonData);
+          setLoading(false);
+        }
+      } catch {
+        if (!cancelled) setLoading(false);
       }
     }
 
-    loadAnalytics();
+    setLoading(true);
+    loadAnalytics().catch(() => {});
+    const intervalId = window.setInterval(() => {
+      loadAnalytics().catch(() => {});
+    }, 8000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
   }, [siteKey]);
 
   return (
@@ -50,7 +51,7 @@ export default function AnalyticsHub() {
             View historical trends, anomaly scoring, security score movement, and compare the current incident window with earlier windows.
           </p>
         </div>
-        <select className="site-select" value={siteKey} onChange={(event) => setSiteKey(event.target.value)}>
+        <select className="site-select" value={siteKey} onChange={(e) => setSiteKey(e.target.value)}>
           <option value="global">Global Platform</option>
           {sites.map((site) => (
             <option key={site.siteKey} value={site.siteKey}>{site.name}</option>
@@ -59,26 +60,32 @@ export default function AnalyticsHub() {
       </section>
 
       <section className="metric-grid">
-        <article className={`metric-card metric-card--${history.anomalyScore >= 70 ? "danger" : history.anomalyScore >= 35 ? "warning" : "success"}`}>
-          <div className="metric-card__eyebrow">Anomaly score</div>
-          <div className="metric-card__value">{history.anomalyScore || 0}</div>
-          <p className="metric-card__detail">Simple baseline-driven anomaly signal</p>
-        </article>
-        <article className="metric-card metric-card--info">
-          <div className="metric-card__eyebrow">Latency trend</div>
-          <div className="metric-card__value">{history.trends?.currentLatency || 0}ms</div>
-          <p className="metric-card__detail">Previous {history.trends?.previousLatency || 0}ms</p>
-        </article>
-        <article className="metric-card metric-card--warning">
-          <div className="metric-card__eyebrow">Threat trend</div>
-          <div className="metric-card__value">{history.trends?.currentThreat || 0}</div>
-          <p className="metric-card__detail">Previous {history.trends?.previousThreat || 0}</p>
-        </article>
-        <article className="metric-card metric-card--violet">
-          <div className="metric-card__eyebrow">Risk trend</div>
-          <div className="metric-card__value">{history.trends?.currentRisk || 0}</div>
-          <p className="metric-card__detail">Previous {history.trends?.previousRisk || 0}</p>
-        </article>
+        {loading ? (
+          [1,2,3,4].map((i) => <SkeletonCard key={i} />)
+        ) : (
+          <>
+            <article className={`metric-card metric-card--${history?.anomalyScore >= 70 ? "danger" : history?.anomalyScore >= 35 ? "warning" : "success"}`}>
+              <div className="metric-card__eyebrow">Anomaly score</div>
+              <div className="metric-card__value">{history?.anomalyScore || 0}</div>
+              <p className="metric-card__detail">Simple baseline-driven anomaly signal</p>
+            </article>
+            <article className="metric-card metric-card--info">
+              <div className="metric-card__eyebrow">Latency trend</div>
+              <div className="metric-card__value">{history?.trends?.currentLatency || 0}ms</div>
+              <p className="metric-card__detail">Previous {history?.trends?.previousLatency || 0}ms</p>
+            </article>
+            <article className="metric-card metric-card--warning">
+              <div className="metric-card__eyebrow">Threat trend</div>
+              <div className="metric-card__value">{history?.trends?.currentThreat || 0}</div>
+              <p className="metric-card__detail">Previous {history?.trends?.previousThreat || 0}</p>
+            </article>
+            <article className="metric-card metric-card--violet">
+              <div className="metric-card__eyebrow">Risk trend</div>
+              <div className="metric-card__value">{history?.trends?.currentRisk || 0}</div>
+              <p className="metric-card__detail">Previous {history?.trends?.previousRisk || 0}</p>
+            </article>
+          </>
+        )}
       </section>
 
       <section className="studio-grid">
@@ -89,17 +96,19 @@ export default function AnalyticsHub() {
               <h2>Historical windows</h2>
             </div>
           </div>
-          <div className="service-list">
-            {history.rows.slice(-12).reverse().map((row) => (
-              <div key={row.ts} className="service-row service-row--info">
-                <div>
-                  <strong>{new Date(row.ts).toLocaleTimeString()}</strong>
-                  <span>{row.latency}ms latency · {row.errorRate}% error</span>
+          {loading ? <SkeletonPanel rows={5} /> : (
+            <div className="service-list">
+              {(history?.rows || []).slice(-12).reverse().map((row) => (
+                <div key={row.ts} className="service-row service-row--info">
+                  <div>
+                    <strong>{new Date(row.ts).toLocaleTimeString()}</strong>
+                    <span>{row.latency}ms latency · {row.errorRate}% error</span>
+                  </div>
+                  <div className="service-row__status">{Math.round(row.riskScore || 0)} risk</div>
                 </div>
-                <div className="service-row__status">{Math.round(row.riskScore || 0)} risk</div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </article>
 
         <article className="panel panel--alerts">

@@ -849,14 +849,87 @@ export default function Dashboard() {
 
   return (
     <main className="dashboard-shell">
-      <section className="hero-panel">
-        <div className="hero-panel__copy">
-          <p className="eyebrow">Spring 2026 Capstone</p>
-          <h1>PulseOps Command Center</h1>
-          <p className="hero-panel__lede">
-            A real-time API traffic cockpit driven by backend events, with live health scoring, anomaly detection, threat intelligence, AI incident analysis, guided response, and scenario-based operations demos.
+      <section className="home-surface">
+        <div className="home-surface__intro">
+          <div className="home-surface__eyebrow-row">
+            <p className="eyebrow">Spring 2026 Capstone</p>
+            <span className="badge badge--info">AI-native operations workspace</span>
+          </div>
+          <h1>PulseOps for live traffic, threat posture, and instant AI response.</h1>
+          <p className="home-surface__lede">
+            A modern command surface for monitoring websites in real time, detecting suspicious behavior, and turning telemetry into actionable intelligence without digging through old-school dashboards.
           </p>
-          <div className="stage-row">
+          <div className="home-surface__actions">
+            {COPILOT_WORKFLOWS.slice(0, 3).map((workflow) => (
+              <button key={workflow.title} type="button" className="home-action-card" onClick={() => launchWorkflow(workflow)}>
+                <span>{workflow.title}</span>
+                <strong>{workflow.description}</strong>
+              </button>
+            ))}
+          </div>
+          <div className="home-surface__footer">
+            <button className="copilot-submit" type="button" onClick={() => activateScenario(activeScenario === 'normal' ? 'bots' : 'normal')}>
+              {activeScenario === 'normal' ? 'Launch Threat Scenario' : 'Return To Calm Mode'}
+            </button>
+            <button className="scenario-chip is-danger" type="button" onClick={triggerSpike}>Trigger Spike</button>
+            <button className="scenario-chip" type="button" onClick={generateReport}>Generate Brief</button>
+          </div>
+        </div>
+
+        <div className="home-surface__visual">
+          <div className="home-orbit-card">
+            <div className="home-orbit-card__ring home-orbit-card__ring--one" />
+            <div className="home-orbit-card__ring home-orbit-card__ring--two" />
+            <div className="home-orbit-card__core">
+              <span>Platform health</span>
+              <strong>{healthScore}/100</strong>
+              <p>{statusBanner.title}</p>
+            </div>
+            <div className="home-orbit-card__float home-orbit-card__float--top">
+              <span>Threat</span>
+              <strong>{threatScore}/100</strong>
+            </div>
+            <div className="home-orbit-card__float home-orbit-card__float--right">
+              <span>Latency</span>
+              <strong>{avgLatency}ms</strong>
+            </div>
+            <div className="home-orbit-card__float home-orbit-card__float--bottom">
+              <span>Traffic</span>
+              <strong>{curRps} req/s</strong>
+            </div>
+          </div>
+
+          <div className="home-signal-grid">
+            <SignalPill label="Stream" value={streamStatus === "live" ? "Connected" : streamStatus === "polling" ? "Polling" : "Reconnecting"} tone={streamStatus === "live" ? "success" : streamStatus === "polling" ? "info" : "warning"} />
+            <SignalPill label="Scenario" value={snapshot.scenarioLabel || "Normal Ops"} tone="info" />
+            <SignalPill label="Copilot" value={copilotResponse.source === "openai" ? "OpenAI" : "Fallback"} tone={copilotResponse.source === "openai" ? "success" : "warning"} />
+            <SignalPill label="Local Time" value={now.toLocaleTimeString()} tone="neutral" />
+          </div>
+        </div>
+      </section>
+
+      <section className="home-glance-grid">
+        <MetricCard eyebrow="Current throughput" value={curRps} suffix="req/s" tone="info" detail={`Peak ${peakRps} req/s in the last minute`} />
+        <MetricCard eyebrow="Average latency" value={avgLatency} suffix="ms" tone={avgLatency >= 450 ? "danger" : avgLatency >= 250 ? "warning" : "success"} detail="Computed from live backend requests" />
+        <MetricCard eyebrow="Error rate" value={errorRate.toFixed(1)} suffix="%" tone={errorRate >= 5 ? "danger" : errorRate >= 2 ? "warning" : "success"} detail={`${incidentCount} incident-class requests detected`} />
+        <article className="metric-card metric-card--violet">
+          <div className="metric-card__eyebrow">Active focus</div>
+          <div className="metric-card__value">{topEndpoint ? topEndpoint.name : 'No hotspot yet'}</div>
+          <p className="metric-card__detail">{topEndpoint ? `${topEndpoint.count} rolling requests with ${topEndpoint.avgLatency}ms average latency` : 'Waiting for endpoint data'}</p>
+        </article>
+      </section>
+
+      <section className="home-story-grid">
+        <article className="panel panel--resources">
+          <div className="panel__header">
+            <div>
+              <p className="eyebrow">Operational posture</p>
+              <h2>What the system is telling you right now</h2>
+            </div>
+            <span className={`badge badge--${statusBanner.tone}`}>{healthLabel}</span>
+          </div>
+          <p className="insight-copy">{statusBanner.detail}</p>
+          <div className="stage-row stage-row--compact">
             {stageCards.map((card) => (
               <div key={card.label} className={`stage-card stage-card--${card.tone}`}>
                 <span>{card.label}</span>
@@ -864,22 +937,19 @@ export default function Dashboard() {
               </div>
             ))}
           </div>
-        </div>
-        <div className="hero-panel__meta">
-          <SignalPill label="Stream" value={streamStatus === "live" ? "Connected" : streamStatus === "polling" ? "Polling" : "Reconnecting"} tone={streamStatus === "live" ? "success" : streamStatus === "polling" ? "info" : "warning"} />
-          <SignalPill label="Health" value={`${healthScore}/100`} tone={healthTone} />
-          <SignalPill label="Threat" value={`${threatScore}/100`} tone={threatScore >= 45 ? "danger" : threatScore >= 20 ? "warning" : "success"} />
-          <SignalPill label="Scenario" value={snapshot.scenarioLabel || "Normal Ops"} tone="info" />
-          <SignalPill label="Copilot" value={copilotResponse.source === "openai" ? "OpenAI" : "Fallback"} tone={copilotResponse.source === "openai" ? "success" : "warning"} />
-          <SignalPill label="Local Time" value={now.toLocaleTimeString()} tone="neutral" />
-        </div>
-      </section>
+        </article>
 
-      <section className="metric-grid">
-        <MetricCard eyebrow="Current throughput" value={curRps} suffix="req/s" tone="info" detail={`Peak ${peakRps} req/s in the last minute`} />
-        <MetricCard eyebrow="Average latency" value={avgLatency} suffix="ms" tone={avgLatency >= 450 ? "danger" : avgLatency >= 250 ? "warning" : "success"} detail="Computed from live backend requests" />
-        <MetricCard eyebrow="Error rate" value={errorRate.toFixed(1)} suffix="%" tone={errorRate >= 5 ? "danger" : errorRate >= 2 ? "warning" : "success"} detail={`${incidentCount} incident-class requests detected`} />
-        <MetricCard eyebrow="Observed traffic" value={formatCompact(totals.totalObserved || 0)} tone="violet" detail={topEndpoint ? `${topEndpoint.name} is carrying the most traffic` : "Waiting for endpoint data"} />
+        <article className="panel panel--copilot">
+          <div className="panel__header">
+            <div>
+              <p className="eyebrow">AI narrative</p>
+              <h2>Fastest path to a useful story</h2>
+            </div>
+            <span className={`badge badge--${insight.source === 'openai' ? 'info' : 'warning'}`}>{insight.source === 'openai' ? 'OpenAI' : 'Fallback'}</span>
+          </div>
+          <div className={`insight-headline insight-headline--${insight.severity || 'normal'}`}>{insight.headline}</div>
+          <p className="insight-copy">{insight.summary}</p>
+        </article>
       </section>
 
       <section className="systems-grid">

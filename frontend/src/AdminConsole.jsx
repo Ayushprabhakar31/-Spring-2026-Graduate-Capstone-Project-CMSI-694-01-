@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-
-const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:9000";
+import * as api from "./services/api";
 
 export default function AdminConsole() {
   const [overview, setOverview] = useState({ users: [], webhooks: [], sharedReports: [], sites: [], deliveryLog: [] });
@@ -9,41 +8,42 @@ export default function AdminConsole() {
 
   async function loadOverview() {
     try {
-      const response = await fetch(`${API_BASE}/api/admin/overview`);
-      if (!response.ok) return;
-      setOverview(await response.json());
-    } catch (error) {
+      const data = await api.getAdminOverview();
+      setOverview(data);
+    } catch {
       // local fallback
     }
   }
 
-  useEffect(() => {
-    loadOverview();
-  }, []);
+  useEffect(() => { loadOverview(); }, []);
 
-  async function createWebhook(event) {
+  async function handleCreateWebhook(event) {
     event.preventDefault();
-    await fetch(`${API_BASE}/api/webhooks`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(webhook),
-    });
-    setWebhook({ channel: "slack", target: "", siteKey: "" });
-    loadOverview();
+    try {
+      await api.createWebhook(webhook);
+      setWebhook({ channel: "slack", target: "", siteKey: "" });
+      loadOverview();
+    } catch {
+      // ignore
+    }
   }
 
-  async function ingestLog() {
-    await fetch(`${API_BASE}/api/logs/ingest`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ raw: rawLog, siteKey: webhook.siteKey || overview.sites[0]?.siteKey }),
-    });
-    loadOverview();
+  async function handleIngestLog() {
+    try {
+      await api.ingestLog({ raw: rawLog, siteKey: webhook.siteKey || overview.sites[0]?.siteKey });
+      loadOverview();
+    } catch {
+      // ignore
+    }
   }
 
-  async function rotateKey(siteKey) {
-    await fetch(`${API_BASE}/api/sites/${siteKey}/rotate-key`, { method: "POST" });
-    loadOverview();
+  async function handleRotateKey(siteKey) {
+    try {
+      await api.rotateSiteKey(siteKey);
+      loadOverview();
+    } catch {
+      // ignore
+    }
   }
 
   return (
@@ -66,14 +66,14 @@ export default function AdminConsole() {
               <h2>Create destinations</h2>
             </div>
           </div>
-          <form className="site-form" onSubmit={createWebhook}>
-            <select className="site-select" value={webhook.channel} onChange={(event) => setWebhook((current) => ({ ...current, channel: event.target.value }))}>
+          <form className="site-form" onSubmit={handleCreateWebhook}>
+            <select className="site-select" value={webhook.channel} onChange={(e) => setWebhook((c) => ({ ...c, channel: e.target.value }))}>
               <option value="slack">Slack</option>
               <option value="discord">Discord</option>
               <option value="email">Email</option>
             </select>
-            <input className="copilot-input query-input" placeholder="Destination or webhook URL" value={webhook.target} onChange={(event) => setWebhook((current) => ({ ...current, target: event.target.value }))} />
-            <select className="site-select" value={webhook.siteKey} onChange={(event) => setWebhook((current) => ({ ...current, siteKey: event.target.value }))}>
+            <input className="copilot-input query-input" placeholder="Destination or webhook URL" value={webhook.target} onChange={(e) => setWebhook((c) => ({ ...c, target: e.target.value }))} />
+            <select className="site-select" value={webhook.siteKey} onChange={(e) => setWebhook((c) => ({ ...c, siteKey: e.target.value }))}>
               <option value="">All sites</option>
               {overview.sites.map((site) => (
                 <option key={site.siteKey} value={site.siteKey}>{site.name}</option>
@@ -90,9 +90,9 @@ export default function AdminConsole() {
               <h2>Import Nginx / Express logs</h2>
             </div>
           </div>
-          <textarea className="code-block-input" value={rawLog} onChange={(event) => setRawLog(event.target.value)} />
+          <textarea className="code-block-input" value={rawLog} onChange={(e) => setRawLog(e.target.value)} />
           <div className="quick-actions">
-            <button className="copilot-submit" onClick={ingestLog} type="button">Ingest Log Line</button>
+            <button className="copilot-submit" onClick={handleIngestLog} type="button">Ingest Log Line</button>
           </div>
         </article>
       </section>
@@ -113,7 +113,7 @@ export default function AdminConsole() {
                   <span>{site.domain}</span>
                   <span>{site.apiKey || "Hidden key"}</span>
                 </div>
-                <button className="copilot-submit" type="button" onClick={() => rotateKey(site.siteKey)}>Rotate Key</button>
+                <button className="copilot-submit" type="button" onClick={() => handleRotateKey(site.siteKey)}>Rotate Key</button>
               </div>
             ))}
           </div>

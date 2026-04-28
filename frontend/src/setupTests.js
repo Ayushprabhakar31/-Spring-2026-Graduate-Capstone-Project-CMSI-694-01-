@@ -47,7 +47,7 @@ beforeEach(() => {
     if (url.includes("/api/query")) {
       return makeJsonResponse({
         title: "Telemetry query",
-        answer: "The mocked endpoint data is healthy.",
+        body: "The mocked endpoint data is healthy.",
         bullets: ["No 5xx spike detected", "Latency remains inside guardrails"],
       });
     }

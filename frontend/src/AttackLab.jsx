@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-
-const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:9000";
+import { useState } from "react";
+import * as api from "./services/api";
+import useSites from "./hooks/useSites";
 
 const PRESETS = [
   { id: "credential", title: "Credential Stuffing", payload: { path: "/login", method: "POST", status: 401, latency: 180, userAgent: "Credential-Stuffer/4.1" } },
@@ -10,31 +10,25 @@ const PRESETS = [
 ];
 
 export default function AttackLab() {
-  const [sites, setSites] = useState([]);
+  const { sites } = useSites();
   const [siteKey, setSiteKey] = useState("");
   const [status, setStatus] = useState("Ready");
 
-  useEffect(() => {
-    async function loadSites() {
-      const response = await fetch(`${API_BASE}/api/sites`);
-      if (!response.ok) return;
-      const data = await response.json();
-      const rows = Array.isArray(data.rows) ? data.rows : [];
-      setSites(rows);
-      setSiteKey(rows[0]?.siteKey || "");
-    }
-    loadSites().catch(() => {});
-  }, []);
-
   async function runPreset(preset) {
-    if (!siteKey) return;
+    const targetKey = siteKey || sites[0]?.siteKey;
+    if (!targetKey) return;
     setStatus(`Running ${preset.title}`);
-    await fetch(`${API_BASE}/api/collect`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ siteKey, apiKey: sites.find((site) => site.siteKey === siteKey)?.apiKey, region: "us-west", ...preset.payload }),
-    });
-    setStatus(`${preset.title} simulated`);
+    try {
+      await api.collectRequest({
+        siteKey: targetKey,
+        apiKey: sites.find((s) => s.siteKey === targetKey)?.apiKey,
+        region: "us-west",
+        ...preset.payload,
+      });
+      setStatus(`${preset.title} simulated`);
+    } catch {
+      setStatus(`${preset.title} failed`);
+    }
   }
 
   return (
@@ -62,7 +56,7 @@ export default function AttackLab() {
               <p className="eyebrow">Target site</p>
               <h2>Preset launcher</h2>
             </div>
-            <select className="site-select" value={siteKey} onChange={(event) => setSiteKey(event.target.value)}>
+            <select className="site-select" value={siteKey} onChange={(e) => setSiteKey(e.target.value)}>
               {sites.map((site) => (
                 <option key={site.siteKey} value={site.siteKey}>{site.name}</option>
               ))}

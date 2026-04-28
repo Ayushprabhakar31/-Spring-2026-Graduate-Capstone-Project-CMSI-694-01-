@@ -36,6 +36,7 @@ const scenarioMap = {
   "/api/metrics": { okMin: 20, okMax: 120, failMin: 240, failMax: 700 },
   "/api/health": { okMin: 10, okMax: 70, failMin: 120, failMax: 300 },
 };
+const DEMO_SIMULATION_ENDPOINTS = ["/api/auth", "/api/users", "/api/orders", "/api/metrics/live", "/api/health/live"];
 const agents = [
   { name: "Chrome-Client", bot: false, malicious: false, weight: 20 },
   { name: "Safari-Mobile", bot: false, malicious: false, weight: 18 },
@@ -1292,6 +1293,15 @@ function buildHomeSummary(snapshot = buildSnapshot()) {
   const serviceWarningCount = (snapshot.serviceHealth || []).filter((item) => item.status !== "healthy").length;
   const priorityAlert = snapshot.alertCenter?.[0];
   const leadBriefing = snapshot.roleBriefings?.[0];
+  const topServices = (snapshot.serviceHealth || []).slice(0, 3);
+  const topSites = (snapshot.siteRows || []).slice(0, 3).map((site) => ({
+    id: site.siteKey,
+    name: site.name,
+    domain: site.domain,
+    status: site.riskScore >= 70 ? "elevated" : site.riskScore >= 45 ? "watch" : "healthy",
+    requests: site.requests || 0,
+    riskScore: site.riskScore || 0,
+  }));
   const recentAudit = (snapshot.auditTrail || []).slice(0, 4).map((entry) => ({
     id: entry.id,
     title: entry.action,
@@ -1309,7 +1319,7 @@ function buildHomeSummary(snapshot = buildSnapshot()) {
       nextBestMoveDetail: priorityAlert?.detail || "Start with the strongest live signal, then use analytics and exports to turn that state into a polished story.",
     },
     stats: [
-      { label: "Active Modules", value: "14", detail: "AI, security, analytics, exports, and demo tools" },
+      { label: "Core Modules", value: "10", detail: "Focused monitoring, analysis, reporting, and admin surfaces" },
       { label: "Live Signals", value: String((snapshot.auditTrail || []).length).padStart(2, "0"), detail: "Recent audit and platform activity" },
       { label: "Threat Score", value: String(snapshot.threatScore || 0), detail: `${snapshot.scenarioLabel || "Normal Ops"} scenario posture` },
       { label: "Current RPS", value: String(snapshot.totals?.currentRps || 0), detail: "Real-time request flow from the live stream" },
@@ -1329,8 +1339,8 @@ function buildHomeSummary(snapshot = buildSnapshot()) {
       { id: "war-room", label: "War Room", text: "Coordinate response, next steps, and briefings.", accent: "danger" },
       { id: "studio", label: "Prompt Studio", text: "Design reusable AI prompts for the demo and operations.", accent: "violet" },
       { id: "sites", label: "Website Monitor", text: "Show live data capture and monitoring credibility.", accent: "info" },
-      { id: "coach", label: "Presentation Coach", text: "Tighten your story, Q&A, and final demo flow.", accent: "success" },
-      { id: "atlas", label: "Threat Atlas", text: "Bring a sharper visual signature to your security story.", accent: "warning" },
+      { id: "security", label: "Security Analyst", text: "Translate signals into diagnosis and recommended response.", accent: "success" },
+      { id: "analytics", label: "Analytics Hub", text: "Compare trends, anomalies, and system behavior over time.", accent: "warning" },
       { id: "exports", label: "Export Center", text: "Package the narrative as polished artifacts and reports.", accent: "info" },
     ],
     status: {
@@ -1339,6 +1349,13 @@ function buildHomeSummary(snapshot = buildSnapshot()) {
       avgLatency: snapshot.totals?.avgLatency || 0,
       serviceWarnings: serviceWarningCount,
       copilotPrompt: leadBriefing?.summary || "Ask the AI analyst for the highest-risk issue and recommended next steps.",
+    },
+    essentials: {
+      monitoredSiteCount: snapshot.siteRows?.length || 0,
+      alertCount: snapshot.alertCenter?.length || 0,
+      incidentCount: snapshot.totals?.incidentCount || 0,
+      topServices,
+      topSites,
     },
   };
 }
@@ -1980,7 +1997,7 @@ app.post("/api/share/report", (req, res) => {
   const id = `share_${Math.random().toString(36).slice(2, 10)}`;
   db.prepare("INSERT INTO shared_reports (id, title, payload_json, created_at) VALUES (?, ?, ?, ?)").run(id, report.title, JSON.stringify({ report, snapshot }), new Date().toISOString());
   logAudit("report.shared", report.title);
-  res.json({ id, url: `http://localhost:${PORT}/share/${id}`, report });
+  res.json({ id, url: `${getBaseUrl(req)}/api/share/${id}`, report });
 });
 
 app.get("/api/share/:id", (req, res) => {
@@ -2262,7 +2279,7 @@ app.post("/api/prompt-studio", async (req, res) => {
   }
 });
 
-app.all("/api/{*path}", (req, res) => {
+app.all(DEMO_SIMULATION_ENDPOINTS, (req, res) => {
   const endpoint = req.path;
   const profile = scenarioMap[endpoint] || { okMin: 30, okMax: 220, failMin: 400, failMax: 1200 };
   const agent = pickWeightedAgent();

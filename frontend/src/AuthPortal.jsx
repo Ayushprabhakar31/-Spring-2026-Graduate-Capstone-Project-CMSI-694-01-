@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:9000";
 
 const ROLE_OPTIONS = [
@@ -26,6 +26,7 @@ export default function AuthPortal({ onAuthenticate }) {
   const [login, setLogin] = useState(INITIAL_LOGIN);
   const [signup, setSignup] = useState(INITIAL_SIGNUP);
   const [authState, setAuthState] = useState({ loading: false, error: "" });
+  const [apiState, setApiState] = useState("checking");
 
   const capabilityRows = useMemo(
     () => [
@@ -36,8 +37,35 @@ export default function AuthPortal({ onAuthenticate }) {
     [],
   );
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function checkBackend() {
+      try {
+        const response = await fetch(`${API_BASE}/health`);
+        if (!cancelled) {
+          setApiState(response.ok ? "online" : "offline");
+        }
+      } catch (error) {
+        if (!cancelled) setApiState("offline");
+      }
+    }
+
+    checkBackend();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const authDisabled = apiState !== "online";
+
   async function submitSignIn(event) {
     event.preventDefault();
+    if (authDisabled) {
+      setAuthState({ loading: false, error: "Backend auth is not live on this public site yet. Use Demo Mode for now." });
+      return;
+    }
+
     setAuthState({ loading: true, error: "" });
     try {
       const response = await fetch(`${API_BASE}/api/auth/login`, {
@@ -57,6 +85,11 @@ export default function AuthPortal({ onAuthenticate }) {
 
   async function submitCreateAccount(event) {
     event.preventDefault();
+    if (authDisabled) {
+      setAuthState({ loading: false, error: "Account creation needs the backend hosted publicly first. Use Demo Mode for now." });
+      return;
+    }
+
     setAuthState({ loading: true, error: "" });
     try {
       const response = await fetch(`${API_BASE}/api/auth/register`, {
@@ -105,7 +138,7 @@ export default function AuthPortal({ onAuthenticate }) {
           <div className="auth-hero__cards">
             <div className="auth-mini-card">
               <span>Workspace state</span>
-              <strong>Secure access enabled</strong>
+              <strong>{apiState === "online" ? "Backend connected" : apiState === "checking" ? "Checking backend" : "Demo mode recommended"}</strong>
             </div>
             <div className="auth-mini-card">
               <span>Demo mode</span>
@@ -130,42 +163,58 @@ export default function AuthPortal({ onAuthenticate }) {
             </div>
           </div>
 
+          {authDisabled ? (
+            <div className="auth-status auth-status--warning">
+              <strong>{apiState === "checking" ? "Checking backend availability" : "Public backend not connected yet"}</strong>
+              <p>
+                Login and account creation require the backend API. Until that is hosted publicly, continue in Demo Mode to explore the product.
+              </p>
+            </div>
+          ) : (
+            <div className="auth-status auth-status--success">
+              <strong>Backend connected</strong>
+              <p>Authentication is live. You can sign in or create a new account.</p>
+            </div>
+          )}
+
           {mode === "signin" ? (
-            <form className="auth-form" onSubmit={submitSignIn}>
+            <form className={`auth-form ${authDisabled ? "is-disabled" : ""}`} onSubmit={submitSignIn}>
               <label className="field">
                 <span>Email</span>
-                <input value={login.email} onChange={(event) => setLogin({ ...login, email: event.target.value })} />
+                <input disabled={authDisabled} value={login.email} onChange={(event) => setLogin({ ...login, email: event.target.value })} />
               </label>
               <label className="field">
                 <span>Password</span>
                 <input
+                  disabled={authDisabled}
                   type="password"
                   value={login.password}
                   onChange={(event) => setLogin({ ...login, password: event.target.value })}
                 />
               </label>
-              <button className="copilot-submit auth-submit" type="submit">{authState.loading ? "Signing in..." : "Access Workspace"}</button>
+              <button className="copilot-submit auth-submit" disabled={authDisabled} type="submit">{authState.loading ? "Signing in..." : "Access Workspace"}</button>
             </form>
           ) : (
-            <form className="auth-form" onSubmit={submitCreateAccount}>
+            <form className={`auth-form ${authDisabled ? "is-disabled" : ""}`} onSubmit={submitCreateAccount}>
               <label className="field">
                 <span>Full name</span>
-                <input value={signup.name} onChange={(event) => setSignup({ ...signup, name: event.target.value })} />
+                <input disabled={authDisabled} value={signup.name} onChange={(event) => setSignup({ ...signup, name: event.target.value })} />
               </label>
               <label className="field">
                 <span>Email</span>
-                <input value={signup.email} onChange={(event) => setSignup({ ...signup, email: event.target.value })} />
+                <input disabled={authDisabled} value={signup.email} onChange={(event) => setSignup({ ...signup, email: event.target.value })} />
               </label>
               <label className="field">
                 <span>Organization</span>
                 <input
+                  disabled={authDisabled}
                   value={signup.organization}
                   onChange={(event) => setSignup({ ...signup, organization: event.target.value })}
                 />
               </label>
               <label className="field">
                 <span>Role</span>
-                <select value={signup.role} onChange={(event) => setSignup({ ...signup, role: event.target.value })}>
+                <select disabled={authDisabled} value={signup.role} onChange={(event) => setSignup({ ...signup, role: event.target.value })}>
                   {ROLE_OPTIONS.map((role) => (
                     <option key={role} value={role}>
                       {role}
@@ -176,12 +225,13 @@ export default function AuthPortal({ onAuthenticate }) {
               <label className="field field--full">
                 <span>Password</span>
                 <input
+                  disabled={authDisabled}
                   type="password"
                   value={signup.password}
                   onChange={(event) => setSignup({ ...signup, password: event.target.value })}
                 />
               </label>
-              <button className="copilot-submit auth-submit" type="submit">{authState.loading ? "Creating account..." : "Create Workspace Account"}</button>
+              <button className="copilot-submit auth-submit" disabled={authDisabled} type="submit">{authState.loading ? "Creating account..." : "Create Workspace Account"}</button>
             </form>
           )}
 

@@ -68,3 +68,19 @@ This section has moved here: [https://facebook.github.io/create-react-app/docs/d
 ### `npm run build` fails to minify
 
 This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+
+
+## Render Deployment
+
+This project includes a repo-root `render.yaml` Blueprint for deploying both services on Render:
+
+- `pulseops-backend`: Node web service from `backend/src`
+- `pulseops-frontend`: static React site from `frontend`
+
+Required setup:
+
+- connect the repository in Render
+- create services from `render.yaml`
+- provide `OPENAI_API_KEY` during Blueprint creation if you want live OpenAI-backed responses
+
+After deployment, Render will assign public `onrender.com` URLs to both services.

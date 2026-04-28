@@ -70,6 +70,11 @@ export default function WarRoom() {
 
   useEffect(() => {
     loadWarRoomAssets();
+    const intervalId = window.setInterval(() => {
+      loadWarRoomAssets().catch(() => {});
+    }, 12000);
+
+    return () => window.clearInterval(intervalId);
   }, []);
 
   const checklistProgress = useMemo(() => {

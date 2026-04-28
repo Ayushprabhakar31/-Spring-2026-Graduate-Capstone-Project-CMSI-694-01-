@@ -1,35 +1,21 @@
 import { useEffect, useState } from "react";
-
-const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:9000";
+import * as api from "./services/api";
+import useSnapshot from "./hooks/useSnapshot";
+import { SkeletonPanel } from "./components/Skeleton";
 
 export default function ExecutiveSuite() {
-  const [snapshot, setSnapshot] = useState(null);
+  const { snapshot, loading: snapshotLoading } = useSnapshot();
   const [report, setReport] = useState(null);
+  const [reportLoading, setReportLoading] = useState(true);
 
   useEffect(() => {
-    async function load() {
-      const [snapshotResponse, reportResponse] = await Promise.all([
-        fetch(`${API_BASE}/api/dashboard/snapshot`),
-        fetch(`${API_BASE}/api/report`, { method: "POST" }),
-      ]);
-
-      if (snapshotResponse.ok) {
-        setSnapshot(await snapshotResponse.json());
-      }
-      if (reportResponse.ok) {
-        setReport(await reportResponse.json());
-      }
-    }
-
-    load().catch(() => {});
+    api.generateReport()
+      .then((data) => { setReport(data); setReportLoading(false); })
+      .catch(() => setReportLoading(false));
   }, []);
 
   function exportExecutiveMemo() {
-    const payload = {
-      snapshot,
-      report,
-      exportedAt: new Date().toISOString(),
-    };
+    const payload = { snapshot, report, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -61,7 +47,7 @@ export default function ExecutiveSuite() {
               <h2>Executive summary</h2>
             </div>
           </div>
-          {snapshot ? (
+          {snapshotLoading ? <SkeletonPanel rows={3} /> : snapshot ? (
             <div className="report-card">
               <p>{snapshot.businessImpact?.summary}</p>
               <div className="report-actions">
@@ -84,7 +70,7 @@ export default function ExecutiveSuite() {
             </div>
             <button className="pause-button" onClick={exportExecutiveMemo} type="button">Export memo</button>
           </div>
-          {report ? (
+          {reportLoading ? <SkeletonPanel rows={3} /> : report ? (
             <div className="report-card">
               <h3>{report.title}</h3>
               <p><strong>Summary:</strong> {report.executiveSummary}</p>
