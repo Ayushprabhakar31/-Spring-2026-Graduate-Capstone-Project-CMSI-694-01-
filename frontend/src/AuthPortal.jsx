@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:9000";
+import { API_BASE } from "./config";
 
 const ROLE_OPTIONS = [
   "Platform Operator",

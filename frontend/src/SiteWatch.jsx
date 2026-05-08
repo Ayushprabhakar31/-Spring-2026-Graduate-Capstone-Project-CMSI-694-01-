@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-
-const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:9000";
+import * as api from "./services/api";
+import { API_BASE } from "./config";
 
 function MiniBar({ label, value, max }) {
   const width = max ? Math.max(8, Math.round((value / max) * 100)) : 8;
@@ -31,6 +31,7 @@ export default function SiteWatch() {
   const [selectedSiteKey, setSelectedSiteKey] = useState("");
   const [snippet, setSnippet] = useState("");
   const [overview, setOverview] = useState(null);
+  const [loadError, setLoadError] = useState("");
   const [form, setForm] = useState({ name: "", domain: "" });
   const [saving, setSaving] = useState(false);
   const [loadingSnippet, setLoadingSnippet] = useState(false);
@@ -39,6 +40,7 @@ export default function SiteWatch() {
   const [weeklySummary, setWeeklySummary] = useState(null);
   const [huntQuery, setHuntQuery] = useState("find admin probes");
   const [huntResult, setHuntResult] = useState(null);
+  const [runtimeConfig, setRuntimeConfig] = useState(null);
 
   const selectedSite = useMemo(
     () => sites.find((site) => site.siteKey === selectedSiteKey) || sites[0] || null,
@@ -48,13 +50,16 @@ export default function SiteWatch() {
   const loadSites = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/api/sites`);
-      if (!response.ok) return;
+      if (!response.ok) throw new Error("Failed to load monitored sites");
       const data = await response.json();
       const rows = Array.isArray(data.rows) ? data.rows : [];
       setSites(rows);
       setSelectedSiteKey((current) => current || rows[0]?.siteKey || "");
+      setLoadError("");
     } catch (error) {
-      // quiet for local demo use
+      setSites([]);
+      setSelectedSiteKey("");
+      setLoadError("Website monitoring data is unavailable right now. Check that the backend is running on port 9000.");
     }
   }, []);
 
@@ -66,6 +71,7 @@ export default function SiteWatch() {
       if (!response.ok) throw new Error("Failed to load snippet");
       const data = await response.json();
       setSnippet(data.snippet || "");
+      setLoadError("");
     } catch (error) {
       setSnippet("Unable to load the collector snippet right now.");
     } finally {
@@ -83,8 +89,11 @@ export default function SiteWatch() {
       setOverview(data);
       setPlaybook(data.playbook || null);
       setWeeklySummary(data.weeklySummary || null);
+      setRuntimeConfig(data.runtimeConfig || null);
+      setLoadError("");
     } catch (error) {
       setOverview(null);
+      setLoadError("Website analytics could not be loaded. The backend may be offline or the selected site may not be available.");
     } finally {
       setLoadingOverview(false);
     }
@@ -127,6 +136,7 @@ export default function SiteWatch() {
       loadOverview(data.site.siteKey).catch(() => {});
     } catch (error) {
       setSnippet("Site registration failed. Check the backend and try again.");
+      setLoadError("Site registration failed because the backend did not accept the request.");
     } finally {
       setSaving(false);
     }
@@ -188,10 +198,25 @@ export default function SiteWatch() {
   const replay = overview?.sessionReplay?.[0] || null;
   const socInbox = overview?.socInbox || [];
   const funnel = overview?.funnel || { human: [], bot: [] };
+  const edgePosture = overview?.edgePosture || null;
+  const trafficSources = overview?.trafficSources || null;
   const maxCountry = Math.max(...countryDist.map((item) => item.value), 0);
   const maxAsn = Math.max(...asnDist.map((item) => item.value), 0);
   const maxTrust = Math.max(...trustDist.map((item) => item.value), 0);
   const wizardSteps = overview?.onboarding || ["Register the website", "Copy the collector snippet", "Confirm telemetry", "Run a security test", "Review alerts"];
+  const hasSiteData = sites.length > 0;
+
+  async function saveRuntimeConfig(nextPatch) {
+    if (!selectedSite) return;
+    try {
+      const data = await api.updateRuntimeConfig(selectedSite.siteKey, { ...(runtimeConfig || {}), ...nextPatch });
+      setRuntimeConfig(data.config);
+      loadSites().catch(() => {});
+      loadOverview(selectedSite.siteKey).catch(() => {});
+    } catch (error) {
+      // quiet for demo
+    }
+  }
 
   return (
     <main className="dashboard-shell">
@@ -205,25 +230,39 @@ export default function SiteWatch() {
         </div>
       </section>
 
+      {loadError ? (
+        <section className="auth-status auth-status--warning">
+          <strong>Website Guard is not receiving backend data</strong>
+          <p>{loadError}</p>
+        </section>
+      ) : null}
+
+      {!loadError && !hasSiteData ? (
+        <section className="auth-status">
+          <strong>No monitored websites yet</strong>
+          <p>Register a site below or restore the backend seed data to populate Website Guard.</p>
+        </section>
+      ) : null}
+
       <section className="metric-grid">
         <article className={`metric-card metric-card--${riskTone}`}>
           <div className="metric-card__eyebrow">Website risk score</div>
-          <div className="metric-card__value">{overview?.riskScore ?? 0}/100</div>
+          <div className="metric-card__value">{hasSiteData ? `${overview?.riskScore ?? 0}/100` : "--"}</div>
           <p className="metric-card__detail">Live security posture for the selected website</p>
         </article>
         <article className="metric-card metric-card--info">
           <div className="metric-card__eyebrow">Monitored sites</div>
-          <div className="metric-card__value">{sites.length}</div>
+          <div className="metric-card__value">{hasSiteData ? sites.length : "--"}</div>
           <p className="metric-card__detail">Domains currently connected to PulseOps</p>
         </article>
         <article className="metric-card metric-card--warning">
           <div className="metric-card__eyebrow">Suspicious events</div>
-          <div className="metric-card__value">{suspiciousEvents.length}</div>
+          <div className="metric-card__value">{hasSiteData ? suspiciousEvents.length : "--"}</div>
           <p className="metric-card__detail">Current rolling window for the selected website</p>
         </article>
         <article className="metric-card metric-card--violet">
           <div className="metric-card__eyebrow">Trust classification</div>
-          <div className="metric-card__value">{trustDist[0]?.name || "trusted"}</div>
+          <div className="metric-card__value">{hasSiteData ? trustDist[0]?.name || "trusted" : "--"}</div>
           <p className="metric-card__detail">Top current traffic reputation tier</p>
         </article>
       </section>
@@ -276,6 +315,89 @@ export default function SiteWatch() {
       </section>
 
       <section className="systems-grid">
+        <article className="panel panel--copilot">
+          <div className="panel__header">
+            <div>
+              <p className="eyebrow">Traffic source control</p>
+              <h2>Use real live traffic when available</h2>
+            </div>
+          </div>
+          <div className="sla-grid">
+            <div className="sla-card">
+              <span>Live browser</span>
+              <strong>{trafficSources?.liveBrowser ?? 0}</strong>
+              <p>{trafficSources?.recentLiveTraffic ? "Recent real visitor traffic detected" : "Waiting for live browser traffic"}</p>
+            </div>
+            <div className="sla-card">
+              <span>Imported logs</span>
+              <strong>{trafficSources?.importedLogs ?? 0}</strong>
+              <p>Server-side or imported traffic events</p>
+            </div>
+            <div className="sla-card">
+              <span>Simulated demo</span>
+              <strong>{trafficSources?.simulatedDemo ?? 0}</strong>
+              <p>Fallback traffic for presentations and testing</p>
+            </div>
+            <div className="sla-card">
+              <span>Primary source</span>
+              <strong>{trafficSources?.primarySource || "none"}</strong>
+              <p>Current dominant traffic source for this site</p>
+            </div>
+          </div>
+          <div className="quick-actions">
+            <button className={`scenario-chip ${runtimeConfig?.trafficMode === "auto" ? "is-active" : ""}`} type="button" onClick={() => saveRuntimeConfig({ trafficMode: "auto" })}>Auto</button>
+            <button className={`scenario-chip ${runtimeConfig?.trafficMode === "live_only" ? "is-active" : ""}`} type="button" onClick={() => saveRuntimeConfig({ trafficMode: "live_only", allowDemo: false })}>Live Only</button>
+            <button className={`scenario-chip ${runtimeConfig?.trafficMode === "demo_only" ? "is-active" : ""}`} type="button" onClick={() => saveRuntimeConfig({ trafficMode: "demo_only", allowDemo: true })}>Demo Only</button>
+            <button className={`scenario-chip ${runtimeConfig?.allowDemo ? "is-active" : ""}`} type="button" onClick={() => saveRuntimeConfig({ allowDemo: !runtimeConfig?.allowDemo })}>
+              {runtimeConfig?.allowDemo ? "Disable Demo Fallback" : "Enable Demo Fallback"}
+            </button>
+          </div>
+          <div className="report-card">
+            <p><strong>Sample rate:</strong> {runtimeConfig?.sampleRate ?? 100}% of browser events accepted</p>
+            <p><strong>Log ingestion:</strong> {runtimeConfig?.ingestLogs ? "enabled" : "disabled"}</p>
+            <p><strong>Last seen:</strong> {trafficSources?.lastSeenAt ? new Date(trafficSources.lastSeenAt).toLocaleTimeString() : "No traffic yet"}</p>
+          </div>
+        </article>
+
+        <article className="panel panel--alerts">
+          <div className="panel__header">
+            <div>
+              <p className="eyebrow">Edge shield</p>
+              <h2>Cloudflare-style protection posture</h2>
+            </div>
+          </div>
+          <div className="sla-grid">
+            <div className="sla-card">
+              <span>WAF hits</span>
+              <strong>{edgePosture?.wafHits ?? 0}</strong>
+              <p>{edgePosture?.policy?.wafMode || "simulate"} mode</p>
+            </div>
+            <div className="sla-card">
+              <span>Bot score</span>
+              <strong>{edgePosture?.botScore ?? 0}/100</strong>
+              <p>{edgePosture?.policy?.botFightMode || "managed"} mitigation</p>
+            </div>
+            <div className="sla-card">
+              <span>Cache hit estimate</span>
+              <strong>{edgePosture?.cacheHitEstimate ?? 0}%</strong>
+              <p>{edgePosture?.policy?.cacheMode || "smart"} edge cache</p>
+            </div>
+            <div className="sla-card">
+              <span>Origin shield</span>
+              <strong>{edgePosture?.originShield || "standby"}</strong>
+              <p>TLS {edgePosture?.tlsMode || "full-strict"}</p>
+            </div>
+          </div>
+          <div className="report-actions">
+            {(edgePosture?.recommendations || []).map((item) => (
+              <div key={item} className="copilot-bullet">
+                <span className="insight-action__dot" />
+                <span>{item}</span>
+              </div>
+            ))}
+          </div>
+        </article>
+
         <article className="panel panel--resources">
           <div className="panel__header">
             <div>
@@ -292,12 +414,15 @@ export default function SiteWatch() {
         <article className="panel panel--alerts">
           <div className="panel__header">
             <div>
-              <p className="eyebrow">API key security</p>
-              <h2>Collector credentials</h2>
+              <p className="eyebrow">Edge settings</p>
+              <h2>Proxy, bot, and cache posture</h2>
             </div>
           </div>
           <div className="report-card">
-            <p>Each monitored site now has its own API key. You can rotate keys from the Admin Console, and the generated snippet uses the current key automatically.</p>
+            <p><strong>DNS proxy:</strong> {edgePosture?.dnsProxy || "proxied"}</p>
+            <p><strong>Security mode:</strong> {edgePosture?.policy?.securityMode || "balanced"}</p>
+            <p><strong>Rate limiting:</strong> {edgePosture?.policy?.rateLimitMode || "adaptive"}</p>
+            <p><strong>Under attack:</strong> {edgePosture?.policy?.underAttack ? "enabled" : "disabled"}</p>
           </div>
         </article>
       </section>

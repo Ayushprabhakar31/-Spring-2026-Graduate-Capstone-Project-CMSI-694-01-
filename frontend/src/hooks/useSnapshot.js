@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { API_BASE, getSnapshot } from "../services/api";
+import { getSnapshot } from "../services/api";
+import { API_BASE } from "../config";
 
 export default function useSnapshot() {
   const [snapshot, setSnapshot] = useState(null);

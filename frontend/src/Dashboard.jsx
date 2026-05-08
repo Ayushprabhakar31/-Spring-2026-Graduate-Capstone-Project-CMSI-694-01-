@@ -10,9 +10,9 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { API_BASE } from "./config";
 
 const DEMO_ENDPOINTS = ["/api/auth", "/api/users", "/api/orders", "/api/metrics/live", "/api/health/live"];
-const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:9000";
 const COPILOT_PROMPTS = [
   "Why is latency high right now?",
   "Which endpoint is failing the most?",

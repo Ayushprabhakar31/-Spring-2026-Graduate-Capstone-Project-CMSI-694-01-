@@ -3,8 +3,10 @@ const cors = require("cors");
 const redis = require("redis");
 const Database = require("better-sqlite3");
 const path = require("path");
+const crypto = require("crypto");
 
 const PORT = process.env.PORT || 9000;
+const HOST = process.env.HOST || "0.0.0.0";
 const REDIS_HOST = process.env.REDIS_HOST || "localhost";
 const REDIS_PORT = parseInt(process.env.REDIS_PORT || "6379", 10);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
@@ -14,7 +16,7 @@ const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 if (ENABLE_REDIS) {
   const redisClient = redis.createClient({ socket: { host: REDIS_HOST, port: REDIS_PORT } });
@@ -67,6 +69,14 @@ const DEFAULT_SITE = {
   createdAt: new Date().toISOString(),
   status: "active",
 };
+const DEFAULT_EDGE_POLICY = {
+  securityMode: "balanced",
+  wafMode: "simulate",
+  rateLimitMode: "adaptive",
+  botFightMode: "managed",
+  cacheMode: "smart",
+  underAttack: false,
+};
 const KNOWN_BOT_PATTERNS = [/bot/i, /crawler/i, /spider/i, /headless/i, /curl/i, /python-requests/i, /scrapy/i];
 const MALICIOUS_PATTERNS = [/attackbot/i, /credential/i, /sqlmap/i, /nikto/i, /masscan/i, /nmap/i];
 const ILLEGAL_PATH_PATTERNS = [
@@ -89,7 +99,7 @@ const COUNTRY_BY_REGION = {
   browser: "Browser Region",
 };
 const ASN_POOL = ["Cloudflare", "AWS", "DigitalOcean", "Google Cloud", "Akamai", "Unknown Network"];
-const DB_PATH = path.join(__dirname, "pulseops.db");
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, "pulseops.db");
 const db = new Database(DB_PATH);
 
 db.exec(`
@@ -140,6 +150,56 @@ db.exec(`
     threat_score REAL NOT NULL,
     risk_score REAL NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS edge_policies (
+    site_key TEXT PRIMARY KEY,
+    security_mode TEXT NOT NULL,
+    waf_mode TEXT NOT NULL,
+    rate_limit_mode TEXT NOT NULL,
+    bot_fight_mode TEXT NOT NULL,
+    cache_mode TEXT NOT NULL,
+    under_attack INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS site_runtime_config (
+    site_key TEXT PRIMARY KEY,
+    traffic_mode TEXT NOT NULL,
+    sample_rate INTEGER NOT NULL,
+    ingest_logs INTEGER NOT NULL DEFAULT 1,
+    allow_demo INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS automation_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_key TEXT,
+    name TEXT NOT NULL,
+    metric_key TEXT NOT NULL,
+    comparator TEXT NOT NULL,
+    threshold_value REAL NOT NULL,
+    action_type TEXT NOT NULL,
+    action_config_json TEXT NOT NULL,
+    cooldown_seconds INTEGER NOT NULL DEFAULT 300,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_triggered_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS automation_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id INTEGER NOT NULL,
+    rule_name TEXT NOT NULL,
+    site_key TEXT,
+    metric_key TEXT NOT NULL,
+    metric_value REAL NOT NULL,
+    action_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    triggered_at TEXT NOT NULL
+  );
 `);
 
 const state = {
@@ -161,6 +221,9 @@ const state = {
   rateLimitEvents: [],
   auditTrail: [],
   sites: [DEFAULT_SITE],
+  edgePolicies: {},
+  runtimeConfig: {},
+  automationRules: [],
   chaosUntil: 0,
   scenario: "normal",
   scenarioUntil: 0,
@@ -204,6 +267,462 @@ function syncSitesFromDb() {
     : [DEFAULT_SITE];
 }
 
+function syncEdgePoliciesFromDb() {
+  const rows = db.prepare("SELECT * FROM edge_policies").all();
+  state.edgePolicies = rows.reduce((accumulator, row) => {
+    accumulator[row.site_key] = {
+      siteKey: row.site_key,
+      securityMode: row.security_mode,
+      wafMode: row.waf_mode,
+      rateLimitMode: row.rate_limit_mode,
+      botFightMode: row.bot_fight_mode,
+      cacheMode: row.cache_mode,
+      underAttack: Boolean(row.under_attack),
+      updatedAt: row.updated_at,
+    };
+    return accumulator;
+  }, {});
+}
+
+function syncRuntimeConfigFromDb() {
+  const rows = db.prepare("SELECT * FROM site_runtime_config").all();
+  state.runtimeConfig = rows.reduce((accumulator, row) => {
+    accumulator[row.site_key] = {
+      siteKey: row.site_key,
+      trafficMode: row.traffic_mode,
+      sampleRate: Number(row.sample_rate || 100),
+      ingestLogs: Boolean(row.ingest_logs),
+      allowDemo: Boolean(row.allow_demo),
+      updatedAt: row.updated_at,
+    };
+    return accumulator;
+  }, {});
+}
+
+function syncAutomationRulesFromDb() {
+  const rows = db.prepare("SELECT * FROM automation_rules ORDER BY created_at DESC, id DESC").all();
+  state.automationRules = rows.map((row) => ({
+    id: Number(row.id),
+    siteKey: row.site_key || "",
+    name: row.name,
+    metricKey: row.metric_key,
+    comparator: row.comparator,
+    thresholdValue: Number(row.threshold_value || 0),
+    actionType: row.action_type,
+    actionConfig: (() => {
+      try {
+        return JSON.parse(row.action_config_json || "{}");
+      } catch {
+        return {};
+      }
+    })(),
+    cooldownSeconds: Number(row.cooldown_seconds || 300),
+    enabled: Boolean(row.enabled),
+    lastTriggeredAt: row.last_triggered_at || null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+function ensureRuntimeConfig(siteKey) {
+  const existing = db.prepare("SELECT site_key FROM site_runtime_config WHERE site_key = ?").get(siteKey);
+  if (!existing) {
+    db.prepare(
+      "INSERT INTO site_runtime_config (site_key, traffic_mode, sample_rate, ingest_logs, allow_demo, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run(siteKey, "auto", 100, 1, 1, new Date().toISOString());
+  }
+  syncRuntimeConfigFromDb();
+  return state.runtimeConfig[siteKey] || {
+    siteKey,
+    trafficMode: "auto",
+    sampleRate: 100,
+    ingestLogs: true,
+    allowDemo: true,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function getRuntimeConfig(siteKey) {
+  return state.runtimeConfig[siteKey] || ensureRuntimeConfig(siteKey);
+}
+
+function updateRuntimeConfig(siteKey, input = {}) {
+  const current = getRuntimeConfig(siteKey);
+  const next = {
+    trafficMode: ["auto", "live_only", "demo_only"].includes(input.trafficMode) ? input.trafficMode : current.trafficMode,
+    sampleRate: Math.max(1, Math.min(100, Number(input.sampleRate ?? current.sampleRate) || current.sampleRate)),
+    ingestLogs: typeof input.ingestLogs === "boolean" ? input.ingestLogs : current.ingestLogs,
+    allowDemo: typeof input.allowDemo === "boolean" ? input.allowDemo : current.allowDemo,
+  };
+  const updatedAt = new Date().toISOString();
+  db.prepare(
+    "INSERT INTO site_runtime_config (site_key, traffic_mode, sample_rate, ingest_logs, allow_demo, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(site_key) DO UPDATE SET traffic_mode = excluded.traffic_mode, sample_rate = excluded.sample_rate, ingest_logs = excluded.ingest_logs, allow_demo = excluded.allow_demo, updated_at = excluded.updated_at",
+  ).run(siteKey, next.trafficMode, next.sampleRate, next.ingestLogs ? 1 : 0, next.allowDemo ? 1 : 0, updatedAt);
+  syncRuntimeConfigFromDb();
+  return state.runtimeConfig[siteKey];
+}
+
+function ensureEdgePolicy(siteKey) {
+  const existing = db.prepare("SELECT site_key FROM edge_policies WHERE site_key = ?").get(siteKey);
+  if (!existing) {
+    db.prepare(
+      "INSERT INTO edge_policies (site_key, security_mode, waf_mode, rate_limit_mode, bot_fight_mode, cache_mode, under_attack, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      siteKey,
+      DEFAULT_EDGE_POLICY.securityMode,
+      DEFAULT_EDGE_POLICY.wafMode,
+      DEFAULT_EDGE_POLICY.rateLimitMode,
+      DEFAULT_EDGE_POLICY.botFightMode,
+      DEFAULT_EDGE_POLICY.cacheMode,
+      DEFAULT_EDGE_POLICY.underAttack ? 1 : 0,
+      new Date().toISOString(),
+    );
+  }
+  syncEdgePoliciesFromDb();
+  return state.edgePolicies[siteKey] || { siteKey, ...DEFAULT_EDGE_POLICY, updatedAt: new Date().toISOString() };
+}
+
+function getEdgePolicy(siteKey) {
+  return state.edgePolicies[siteKey] || ensureEdgePolicy(siteKey);
+}
+
+function updateEdgePolicy(siteKey, input = {}) {
+  const current = getEdgePolicy(siteKey);
+  const next = {
+    securityMode: ["relaxed", "balanced", "strict"].includes(input.securityMode) ? input.securityMode : current.securityMode,
+    wafMode: ["off", "simulate", "block"].includes(input.wafMode) ? input.wafMode : current.wafMode,
+    rateLimitMode: ["basic", "adaptive", "aggressive"].includes(input.rateLimitMode) ? input.rateLimitMode : current.rateLimitMode,
+    botFightMode: ["observe", "managed", "super"].includes(input.botFightMode) ? input.botFightMode : current.botFightMode,
+    cacheMode: ["off", "smart", "cache-everything"].includes(input.cacheMode) ? input.cacheMode : current.cacheMode,
+    underAttack: typeof input.underAttack === "boolean" ? input.underAttack : current.underAttack,
+  };
+  const updatedAt = new Date().toISOString();
+  db.prepare(
+    "INSERT INTO edge_policies (site_key, security_mode, waf_mode, rate_limit_mode, bot_fight_mode, cache_mode, under_attack, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(site_key) DO UPDATE SET security_mode = excluded.security_mode, waf_mode = excluded.waf_mode, rate_limit_mode = excluded.rate_limit_mode, bot_fight_mode = excluded.bot_fight_mode, cache_mode = excluded.cache_mode, under_attack = excluded.under_attack, updated_at = excluded.updated_at",
+  ).run(siteKey, next.securityMode, next.wafMode, next.rateLimitMode, next.botFightMode, next.cacheMode, next.underAttack ? 1 : 0, updatedAt);
+  syncEdgePoliciesFromDb();
+  return state.edgePolicies[siteKey];
+}
+
+function buildDefaultAutomationRuleSet() {
+  const siteKey = state.sites[0]?.siteKey || DEFAULT_SITE.siteKey;
+  const now = new Date().toISOString();
+  return [
+    {
+      siteKey,
+      name: "Protect elevated site risk",
+      metricKey: "site_risk_score",
+      comparator: "gte",
+      thresholdValue: 65,
+      actionType: "edge_lockdown",
+      actionConfig: {
+        securityMode: "strict",
+        wafMode: "block",
+        rateLimitMode: "aggressive",
+        botFightMode: "super",
+        underAttack: true,
+      },
+      cooldownSeconds: 300,
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      siteKey: "",
+      name: "Broadcast major incident posture",
+      metricKey: "global_threat_score",
+      comparator: "gte",
+      thresholdValue: 45,
+      actionType: "notify_webhook",
+      actionConfig: {
+        severity: "critical",
+        note: "Automation detected an elevated global threat posture.",
+      },
+      cooldownSeconds: 240,
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+    },
+  ];
+}
+
+function createAutomationRule(input = {}) {
+  const now = new Date().toISOString();
+  const siteKey = input.siteKey && state.sites.some((site) => site.siteKey === input.siteKey) ? input.siteKey : null;
+  const name = String(input.name || "").trim() || "Untitled automation";
+  const metricKey = [
+    "global_threat_score",
+    "global_error_rate",
+    "global_latency",
+    "site_risk_score",
+    "site_error_rate",
+    "site_blocked_requests",
+    "site_bot_requests",
+  ].includes(input.metricKey)
+    ? input.metricKey
+    : "site_risk_score";
+  const comparator = ["gte", "lte"].includes(input.comparator) ? input.comparator : "gte";
+  const thresholdValue = Number(input.thresholdValue ?? 0);
+  const actionType = ["notify_webhook", "edge_lockdown", "generate_playbook", "share_report"].includes(input.actionType)
+    ? input.actionType
+    : "notify_webhook";
+  const actionConfig = input.actionConfig && typeof input.actionConfig === "object" ? input.actionConfig : {};
+  const cooldownSeconds = Math.max(60, Math.min(3600, Number(input.cooldownSeconds ?? 300) || 300));
+  const enabled = typeof input.enabled === "boolean" ? input.enabled : true;
+
+  const result = db.prepare(
+    "INSERT INTO automation_rules (site_key, name, metric_key, comparator, threshold_value, action_type, action_config_json, cooldown_seconds, enabled, last_triggered_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(siteKey, name, metricKey, comparator, thresholdValue, actionType, JSON.stringify(actionConfig), cooldownSeconds, enabled ? 1 : 0, null, now, now);
+  syncAutomationRulesFromDb();
+  return state.automationRules.find((rule) => rule.id === Number(result.lastInsertRowid));
+}
+
+function updateAutomationRule(ruleId, input = {}) {
+  const current = state.automationRules.find((rule) => rule.id === Number(ruleId));
+  if (!current) return null;
+
+  const next = {
+    siteKey: typeof input.siteKey === "string"
+      ? (input.siteKey && state.sites.some((site) => site.siteKey === input.siteKey) ? input.siteKey : "")
+      : current.siteKey,
+    name: typeof input.name === "string" && input.name.trim() ? input.name.trim() : current.name,
+    metricKey: typeof input.metricKey === "string" ? input.metricKey : current.metricKey,
+    comparator: typeof input.comparator === "string" ? input.comparator : current.comparator,
+    thresholdValue: input.thresholdValue !== undefined ? Number(input.thresholdValue) : current.thresholdValue,
+    actionType: typeof input.actionType === "string" ? input.actionType : current.actionType,
+    actionConfig: input.actionConfig && typeof input.actionConfig === "object" ? input.actionConfig : current.actionConfig,
+    cooldownSeconds: input.cooldownSeconds !== undefined ? Math.max(60, Math.min(3600, Number(input.cooldownSeconds) || current.cooldownSeconds)) : current.cooldownSeconds,
+    enabled: typeof input.enabled === "boolean" ? input.enabled : current.enabled,
+    lastTriggeredAt: input.lastTriggeredAt !== undefined ? input.lastTriggeredAt : current.lastTriggeredAt,
+    updatedAt: new Date().toISOString(),
+  };
+
+  db.prepare(
+    "UPDATE automation_rules SET site_key = ?, name = ?, metric_key = ?, comparator = ?, threshold_value = ?, action_type = ?, action_config_json = ?, cooldown_seconds = ?, enabled = ?, last_triggered_at = ?, updated_at = ? WHERE id = ?",
+  ).run(
+    next.siteKey || null,
+    next.name,
+    next.metricKey,
+    next.comparator,
+    next.thresholdValue,
+    next.actionType,
+    JSON.stringify(next.actionConfig || {}),
+    next.cooldownSeconds,
+    next.enabled ? 1 : 0,
+    next.lastTriggeredAt,
+    next.updatedAt,
+    current.id,
+  );
+
+  syncAutomationRulesFromDb();
+  return state.automationRules.find((rule) => rule.id === current.id) || null;
+}
+
+function listAutomationRuns(limit = 30) {
+  return db.prepare("SELECT * FROM automation_runs ORDER BY triggered_at DESC, id DESC LIMIT ?").all(limit).map((row) => ({
+    id: Number(row.id),
+    ruleId: Number(row.rule_id),
+    ruleName: row.rule_name,
+    siteKey: row.site_key || "",
+    metricKey: row.metric_key,
+    metricValue: Number(row.metric_value || 0),
+    actionType: row.action_type,
+    status: row.status,
+    summary: row.summary,
+    details: (() => {
+      try {
+        return JSON.parse(row.details_json || "{}");
+      } catch {
+        return {};
+      }
+    })(),
+    triggeredAt: row.triggered_at,
+  }));
+}
+
+function recordAutomationRun(rule, payload) {
+  const triggeredAt = new Date().toISOString();
+  db.prepare(
+    "INSERT INTO automation_runs (rule_id, rule_name, site_key, metric_key, metric_value, action_type, status, summary, details_json, triggered_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(
+    rule.id,
+    rule.name,
+    payload.siteKey || null,
+    rule.metricKey,
+    Number(payload.metricValue || 0),
+    rule.actionType,
+    payload.status || "success",
+    payload.summary || "Automation executed",
+    JSON.stringify(payload.details || {}),
+    triggeredAt,
+  );
+  db.prepare("DELETE FROM automation_runs WHERE id NOT IN (SELECT id FROM automation_runs ORDER BY triggered_at DESC, id DESC LIMIT 200)").run();
+  return triggeredAt;
+}
+
+function evaluateComparator(left, comparator, right) {
+  if (comparator === "lte") return left <= right;
+  return left >= right;
+}
+
+function resolveAutomationTargetSite(rule, snapshot) {
+  if (rule.siteKey) {
+    return state.sites.find((site) => site.siteKey === rule.siteKey) || null;
+  }
+  const busiest = snapshot.siteRows[0];
+  if (busiest?.siteKey) {
+    return state.sites.find((site) => site.siteKey === busiest.siteKey) || null;
+  }
+  return state.sites[0] || DEFAULT_SITE;
+}
+
+function resolveAutomationMetric(rule, snapshot) {
+  const targetSite = resolveAutomationTargetSite(rule, snapshot);
+  const siteRow = targetSite ? snapshot.siteRows.find((row) => row.siteKey === targetSite.siteKey) : null;
+
+  switch (rule.metricKey) {
+    case "global_threat_score":
+      return { value: snapshot.threatScore || 0, label: "Global threat score", site: null };
+    case "global_error_rate":
+      return { value: snapshot.totals.errorRate || 0, label: "Global error rate", site: null };
+    case "global_latency":
+      return { value: snapshot.totals.avgLatency || 0, label: "Global average latency", site: null };
+    case "site_error_rate":
+      return { value: siteRow?.errorRate || 0, label: "Site error rate", site: targetSite };
+    case "site_blocked_requests":
+      return { value: siteRow?.blocked || 0, label: "Site blocked requests", site: targetSite };
+    case "site_bot_requests":
+      return { value: siteRow?.bots || 0, label: "Site bot requests", site: targetSite };
+    case "site_risk_score":
+    default:
+      return { value: siteRow?.riskScore || 0, label: "Site risk score", site: targetSite };
+  }
+}
+
+function executeAutomationAction(rule, context) {
+  const site = context.site;
+  const valueText = `${context.metric.label}=${Number(context.metric.value || 0)}`;
+
+  if (rule.actionType === "notify_webhook") {
+    triggerWebhookDeliveries(site?.siteKey || null, {
+      source: "automation",
+      rule: rule.name,
+      metricKey: rule.metricKey,
+      metricValue: context.metric.value,
+      note: rule.actionConfig?.note || `${rule.name} triggered`,
+    });
+    return {
+      status: "success",
+      summary: `Webhook automation delivered for ${rule.name}`,
+      details: { siteKey: site?.siteKey || "", note: rule.actionConfig?.note || "", metric: valueText },
+    };
+  }
+
+  if (rule.actionType === "edge_lockdown") {
+    if (!site?.siteKey) {
+      return {
+        status: "skipped",
+        summary: `Edge lockdown skipped for ${rule.name}`,
+        details: { reason: "No eligible site found" },
+      };
+    }
+    const policy = updateEdgePolicy(site.siteKey, {
+      securityMode: "strict",
+      wafMode: "block",
+      rateLimitMode: "aggressive",
+      botFightMode: "super",
+      underAttack: true,
+      ...(rule.actionConfig || {}),
+    });
+    return {
+      status: "success",
+      summary: `Edge lockdown applied to ${site.name}`,
+      details: { siteKey: site.siteKey, policy },
+    };
+  }
+
+  if (rule.actionType === "generate_playbook") {
+    const overview = buildSiteOverview(site?.siteKey || DEFAULT_SITE.siteKey);
+    triggerWebhookDeliveries(overview.site.siteKey, {
+      source: "automation",
+      rule: rule.name,
+      playbook: overview.playbook,
+    });
+    return {
+      status: "success",
+      summary: `Playbook generated for ${overview.site.name}`,
+      details: { siteKey: overview.site.siteKey, summary: overview.playbook.summary },
+    };
+  }
+
+  if (rule.actionType === "share_report") {
+    const snapshot = context.snapshot || buildSnapshot();
+    const report = buildIncidentReport(snapshot);
+    const id = `share_${Math.random().toString(36).slice(2, 10)}`;
+    db.prepare("INSERT INTO shared_reports (id, title, payload_json, created_at) VALUES (?, ?, ?, ?)").run(
+      id,
+      report.title,
+      JSON.stringify({ report, snapshot }),
+      new Date().toISOString(),
+    );
+    return {
+      status: "success",
+      summary: `Incident report shared as ${id}`,
+      details: { reportId: id, title: report.title },
+    };
+  }
+
+  return {
+    status: "skipped",
+    summary: `No action handler for ${rule.actionType}`,
+    details: { actionType: rule.actionType },
+  };
+}
+
+function evaluateAutomationRules(snapshot, options = {}) {
+  const now = Date.now();
+  const triggered = [];
+
+  state.automationRules
+    .filter((rule) => rule.enabled)
+    .forEach((rule) => {
+      const metric = resolveAutomationMetric(rule, snapshot);
+      const breached = evaluateComparator(Number(metric.value || 0), rule.comparator, Number(rule.thresholdValue || 0));
+      if (!breached) return;
+
+      const lastTriggeredTs = rule.lastTriggeredAt ? new Date(rule.lastTriggeredAt).getTime() : 0;
+      const cooldownMs = Math.max(60, Number(rule.cooldownSeconds || 300)) * 1000;
+      if (!options.manual && lastTriggeredTs && now - lastTriggeredTs < cooldownMs) return;
+
+      const site = metric.site;
+      const actionResult = executeAutomationAction(rule, { metric, site, snapshot });
+      const summary = `${rule.name} fired because ${metric.label.toLowerCase()} hit ${Number(metric.value || 0)}.`;
+      const triggeredAt = recordAutomationRun(rule, {
+        siteKey: site?.siteKey || "",
+        metricValue: metric.value,
+        status: actionResult.status,
+        summary,
+        details: actionResult.details,
+      });
+      updateAutomationRule(rule.id, { lastTriggeredAt: triggeredAt });
+      logAudit("automation.triggered", `${rule.name} -> ${actionResult.summary}`);
+      triggered.push({
+        ruleId: rule.id,
+        ruleName: rule.name,
+        siteKey: site?.siteKey || "",
+        metricKey: rule.metricKey,
+        metricValue: Number(metric.value || 0),
+        actionType: rule.actionType,
+        status: actionResult.status,
+        summary,
+        actionSummary: actionResult.summary,
+        triggeredAt,
+      });
+    });
+
+  return triggered;
+}
+
 function ensureSeedData() {
   const userCount = db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
   if (!userCount) {
@@ -220,6 +739,12 @@ function ensureSeedData() {
   }
 
   syncSitesFromDb();
+  state.sites.forEach((site) => ensureEdgePolicy(site.siteKey));
+  state.sites.forEach((site) => ensureRuntimeConfig(site.siteKey));
+  syncAutomationRulesFromDb();
+  if (!state.automationRules.length) {
+    buildDefaultAutomationRuleSet().forEach((rule) => createAutomationRule(rule));
+  }
 }
 
 function pick(values) {
@@ -242,6 +767,10 @@ function normalizeDomain(value) {
     .toLowerCase();
 }
 
+function isValidEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
+}
+
 function createSite(name, domain) {
   const normalizedDomain = normalizeDomain(domain);
   const apiKey = generateApiKey();
@@ -257,6 +786,8 @@ function createSite(name, domain) {
     "INSERT OR REPLACE INTO sites (site_key, name, domain, status, created_at, api_key, owner_email) VALUES (?, ?, ?, ?, ?, ?, ?)",
   ).run(site.siteKey, site.name, site.domain, site.status, site.createdAt, site.apiKey, null);
   syncSitesFromDb();
+  ensureEdgePolicy(site.siteKey);
+  ensureRuntimeConfig(site.siteKey);
   return site;
 }
 
@@ -552,9 +1083,92 @@ function buildWeeklySummary(requests, site) {
   };
 }
 
+function buildTrafficSourceSummary(requests, siteKey) {
+  const siteRequests = requests.filter((request) => request.siteKey === siteKey);
+  const counts = siteRequests.reduce((accumulator, request) => {
+    const key = request.sourceType || "unknown";
+    accumulator[key] = (accumulator[key] || 0) + 1;
+    return accumulator;
+  }, {});
+  const liveBrowser = counts.live_browser || 0;
+  const importedLogs = counts.ingested_log || 0;
+  const simulatedDemo = counts.simulated_demo || 0;
+  const lastSeenAt = siteRequests[0]?.ts || null;
+  const primarySource = liveBrowser >= Math.max(importedLogs, simulatedDemo)
+    ? "live_browser"
+    : importedLogs >= simulatedDemo
+      ? "ingested_log"
+      : "simulated_demo";
+  return {
+    liveBrowser,
+    importedLogs,
+    simulatedDemo,
+    total: siteRequests.length,
+    lastSeenAt,
+    primarySource: siteRequests.length ? primarySource : "none",
+    recentLiveTraffic: Boolean(lastSeenAt && liveBrowser && Date.now() - lastSeenAt < 5 * 60 * 1000),
+  };
+}
+
+function buildEdgePosture(site, requests) {
+  const policy = getEdgePolicy(site.siteKey);
+  const total = Math.max(1, requests.length);
+  const suspicious = requests.filter((request) => request.malicious || request.illegalAttempt).length;
+  const bots = requests.filter((request) => request.bot).length;
+  const blocked = requests.filter((request) => request.blocked).length;
+  const authAbuse = requests.filter((request) => request.warnings?.includes("Authentication abuse pattern detected")).length;
+  const cacheHitEstimate = Math.max(
+    18,
+    Math.min(
+      96,
+      Math.round(
+        policy.cacheMode === "cache-everything"
+          ? 82 - (suspicious > 0 ? 6 : 0)
+          : policy.cacheMode === "smart"
+            ? 64 - (authAbuse > 0 ? 4 : 0)
+            : 24,
+      ),
+    ),
+  );
+  const botScore = Math.min(100, Math.round((bots / total) * 100 + blocked * 5 + suspicious * 4));
+  const wafHits = suspicious + authAbuse + Math.round(blocked * 0.7);
+  const edgeStatus =
+    policy.underAttack || policy.wafMode === "block" || botScore >= 70
+      ? "shielding"
+      : suspicious || bots
+        ? "watching"
+        : "stable";
+
+  return {
+    policy,
+    status: edgeStatus,
+    wafHits,
+    botScore,
+    cacheHitEstimate,
+    blockedRequests: blocked,
+    edgeRequests: requests.length,
+    dnsProxy: "proxied",
+    originShield: policy.underAttack || policy.securityMode === "strict" ? "active" : "standby",
+    tlsMode: "full-strict",
+    recommendations: [
+      policy.wafMode === "simulate"
+        ? "Move WAF from simulate to block once the current false-positive rate is acceptable."
+        : "Review the latest blocked events and promote stable signatures into durable WAF rules.",
+      authAbuse
+        ? "Tighten auth route rate limiting and challenge repeated failed-login sequences."
+        : "Keep adaptive rate limiting on sensitive login and admin paths.",
+      cacheHitEstimate < 60
+        ? "Increase edge cache coverage for static and anonymous content to reduce origin pressure."
+        : "Current cache policy is reducing origin load effectively; keep cache exclusions narrow.",
+    ],
+  };
+}
+
 function buildSiteOverview(siteKey) {
   const site = state.sites.find((item) => item.siteKey === siteKey) || DEFAULT_SITE;
   const requests = state.requests.filter((request) => request.siteKey === site.siteKey);
+  const runtimeConfig = getRuntimeConfig(site.siteKey);
+  const trafficSources = buildTrafficSourceSummary(state.requests, site.siteKey);
   const suspiciousEvents = buildSuspiciousEvents(requests);
   const abuseTimeline = suspiciousEvents.map((event) => ({
     id: event.id,
@@ -601,9 +1215,12 @@ function buildSiteOverview(siteKey) {
   const playbook = buildAttackPlaybook(requests, site);
   const weeklySummary = buildWeeklySummary(requests, site);
   const riskScore = buildRiskScore(requests);
+  const edgePosture = buildEdgePosture(site, requests);
 
   return {
     site,
+    runtimeConfig,
+    trafficSources,
     requests,
     riskScore,
     suspiciousEvents,
@@ -616,6 +1233,7 @@ function buildSiteOverview(siteKey) {
     socInbox,
     playbook,
     weeklySummary,
+    edgePosture,
     alertSnapshot: {
       title: `${site.name} alert snapshot`,
       summary: playbook.summary,
@@ -1319,7 +1937,7 @@ function buildHomeSummary(snapshot = buildSnapshot()) {
       nextBestMoveDetail: priorityAlert?.detail || "Start with the strongest live signal, then use analytics and exports to turn that state into a polished story.",
     },
     stats: [
-      { label: "Core Modules", value: "10", detail: "Focused monitoring, analysis, reporting, and admin surfaces" },
+      { label: "Core Modules", value: "11", detail: "Focused monitoring, analysis, reporting, automation, and admin surfaces" },
       { label: "Live Signals", value: String((snapshot.auditTrail || []).length).padStart(2, "0"), detail: "Recent audit and platform activity" },
       { label: "Threat Score", value: String(snapshot.threatScore || 0), detail: `${snapshot.scenarioLabel || "Normal Ops"} scenario posture` },
       { label: "Current RPS", value: String(snapshot.totals?.currentRps || 0), detail: "Real-time request flow from the live stream" },
@@ -1339,6 +1957,7 @@ function buildHomeSummary(snapshot = buildSnapshot()) {
       { id: "war-room", label: "War Room", text: "Coordinate response, next steps, and briefings.", accent: "danger" },
       { id: "studio", label: "Prompt Studio", text: "Design reusable AI prompts for the demo and operations.", accent: "violet" },
       { id: "sites", label: "Website Monitor", text: "Show live data capture and monitoring credibility.", accent: "info" },
+      { id: "automation", label: "Automation Center", text: "Trigger playbooks, reports, alerts, and edge controls automatically.", accent: "success" },
       { id: "security", label: "Security Analyst", text: "Translate signals into diagnosis and recommended response.", accent: "success" },
       { id: "analytics", label: "Analytics Hub", text: "Compare trends, anomalies, and system behavior over time.", accent: "warning" },
       { id: "exports", label: "Export Center", text: "Package the narrative as polished artifacts and reports.", accent: "info" },
@@ -1698,6 +2317,7 @@ function flushMetrics() {
     "DELETE FROM history_points WHERE id NOT IN (SELECT id FROM history_points ORDER BY ts DESC LIMIT 5000)",
   ).run();
 
+  evaluateAutomationRules(snapshot);
   broadcast("snapshot", snapshot);
   broadcast("home", buildHomeSummary(snapshot));
 }
@@ -1705,7 +2325,14 @@ function flushMetrics() {
 setInterval(flushMetrics, 1000);
 
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", service: "backend", ts: Date.now() });
+  res.json({
+    status: "ok",
+    service: "backend",
+    ts: Date.now(),
+    mode: OPENAI_API_KEY ? "openai-connected" : "fallback",
+    redis: ENABLE_REDIS ? "enabled" : "disabled",
+    monitoredSites: state.sites.length,
+  });
 });
 
 app.post("/api/auth/register", (req, res) => {
@@ -1717,6 +2344,12 @@ app.post("/api/auth/register", (req, res) => {
 
   if (!name || !email || !password) {
     return res.status(400).json({ error: "name, email, and password are required" });
+  }
+  if (!isValidEmail(email)) {
+    return res.status(400).json({ error: "email must be valid" });
+  }
+  if (password.length < 8) {
+    return res.status(400).json({ error: "password must be at least 8 characters" });
   }
 
   try {
@@ -1744,6 +2377,9 @@ app.post("/api/auth/register", (req, res) => {
 app.post("/api/auth/login", (req, res) => {
   const email = String(req.body?.email || "").trim().toLowerCase();
   const password = String(req.body?.password || "");
+  if (!email || !password) {
+    return res.status(400).json({ error: "email and password are required" });
+  }
   const user = db.prepare("SELECT * FROM users WHERE email = ?").get(email);
 
   if (!user || user.password_hash !== hashPassword(password)) {
@@ -1817,6 +2453,10 @@ app.get("/api/admin/overview", (req, res) => {
     webhooks,
     sharedReports,
     sites: state.sites,
+    edgePolicies: Object.values(state.edgePolicies),
+    runtimeConfig: Object.values(state.runtimeConfig),
+    automationRules: state.automationRules,
+    automationRuns: listAutomationRuns(20),
     deliveryLog: state.deliveryLog,
   });
 });
@@ -1835,6 +2475,8 @@ app.get("/api/sites", (req, res) => {
         blocked: live?.blocked || 0,
         warnings: live?.warnings || 0,
         riskScore: live?.riskScore || 0,
+        trafficMode: getRuntimeConfig(site.siteKey).trafficMode,
+        trafficSources: buildTrafficSourceSummary(state.requests, site.siteKey),
       };
     }),
     count: state.sites.length,
@@ -1899,6 +2541,58 @@ app.get("/api/sites/:siteKey/overview", (req, res) => {
   }
 
   return res.json(buildSiteOverview(site.siteKey));
+});
+
+app.get("/api/sites/:siteKey/edge-config", (req, res) => {
+  const site = state.sites.find((item) => item.siteKey === req.params.siteKey);
+  if (!site) {
+    return res.status(404).json({ error: "site not found" });
+  }
+  return res.json({
+    site: { siteKey: site.siteKey, name: site.name, domain: site.domain },
+    policy: getEdgePolicy(site.siteKey),
+    posture: buildEdgePosture(site, state.requests.filter((request) => request.siteKey === site.siteKey)),
+  });
+});
+
+app.get("/api/sites/:siteKey/runtime-config", (req, res) => {
+  const site = state.sites.find((item) => item.siteKey === req.params.siteKey);
+  if (!site) {
+    return res.status(404).json({ error: "site not found" });
+  }
+  return res.json({
+    site: { siteKey: site.siteKey, name: site.name, domain: site.domain },
+    config: getRuntimeConfig(site.siteKey),
+    trafficSources: buildTrafficSourceSummary(state.requests, site.siteKey),
+  });
+});
+
+app.post("/api/sites/:siteKey/runtime-config", (req, res) => {
+  const site = state.sites.find((item) => item.siteKey === req.params.siteKey);
+  if (!site) {
+    return res.status(404).json({ error: "site not found" });
+  }
+  const config = updateRuntimeConfig(site.siteKey, req.body || {});
+  logAudit("site.runtime-updated", `${site.name} -> ${config.trafficMode}`);
+  return res.json({
+    site: { siteKey: site.siteKey, name: site.name, domain: site.domain },
+    config,
+    trafficSources: buildTrafficSourceSummary(state.requests, site.siteKey),
+  });
+});
+
+app.post("/api/sites/:siteKey/edge-config", (req, res) => {
+  const site = state.sites.find((item) => item.siteKey === req.params.siteKey);
+  if (!site) {
+    return res.status(404).json({ error: "site not found" });
+  }
+  const policy = updateEdgePolicy(site.siteKey, req.body || {});
+  logAudit("edge.policy-updated", `${site.name} -> ${policy.securityMode}/${policy.wafMode}/${policy.botFightMode}`);
+  return res.json({
+    site: { siteKey: site.siteKey, name: site.name, domain: site.domain },
+    policy,
+    posture: buildEdgePosture(site, state.requests.filter((request) => request.siteKey === site.siteKey)),
+  });
 });
 
 app.post("/api/security/playbook", (req, res) => {
@@ -1991,6 +2685,64 @@ app.post("/api/webhooks", (req, res) => {
   return res.status(201).json({ id: result.lastInsertRowid, siteKey, channel, target, status: "active", createdAt });
 });
 
+app.get("/api/automation/overview", (req, res) => {
+  res.json({
+    rules: state.automationRules,
+    runs: listAutomationRuns(30),
+    sites: state.sites.map((site) => ({ siteKey: site.siteKey, name: site.name, domain: site.domain })),
+    catalogs: {
+      metrics: [
+        { id: "site_risk_score", label: "Site risk score" },
+        { id: "site_error_rate", label: "Site error rate" },
+        { id: "site_blocked_requests", label: "Site blocked requests" },
+        { id: "site_bot_requests", label: "Site bot requests" },
+        { id: "global_threat_score", label: "Global threat score" },
+        { id: "global_error_rate", label: "Global error rate" },
+        { id: "global_latency", label: "Global average latency" },
+      ],
+      comparators: [
+        { id: "gte", label: "Greater than or equal to" },
+        { id: "lte", label: "Less than or equal to" },
+      ],
+      actions: [
+        { id: "notify_webhook", label: "Deliver webhook alert" },
+        { id: "edge_lockdown", label: "Apply edge lockdown" },
+        { id: "generate_playbook", label: "Generate playbook and alert" },
+        { id: "share_report", label: "Create shared incident report" },
+      ],
+    },
+  });
+});
+
+app.post("/api/automation/rules", (req, res) => {
+  const name = String(req.body?.name || "").trim();
+  if (!name) {
+    return res.status(400).json({ error: "rule name is required" });
+  }
+  const rule = createAutomationRule(req.body || {});
+  logAudit("automation.rule-created", rule.name);
+  return res.status(201).json({ rule });
+});
+
+app.post("/api/automation/rules/:id", (req, res) => {
+  const rule = updateAutomationRule(req.params.id, req.body || {});
+  if (!rule) {
+    return res.status(404).json({ error: "automation rule not found" });
+  }
+  logAudit("automation.rule-updated", rule.name);
+  return res.json({ rule });
+});
+
+app.post("/api/automation/evaluate", (req, res) => {
+  const snapshot = buildSnapshot();
+  const triggered = evaluateAutomationRules(snapshot, { manual: true });
+  return res.json({
+    triggered,
+    count: triggered.length,
+    runs: listAutomationRuns(20),
+  });
+});
+
 app.post("/api/share/report", (req, res) => {
   const snapshot = buildSnapshot();
   const report = buildIncidentReport(snapshot);
@@ -2012,8 +2764,12 @@ app.post("/api/logs/ingest", (req, res) => {
   const raw = String(req.body?.raw || "").trim();
   const siteKey = String(req.body?.siteKey || DEFAULT_SITE.siteKey);
   const site = state.sites.find((item) => item.siteKey === siteKey) || state.sites[0];
+  const runtimeConfig = getRuntimeConfig(site.siteKey);
   if (!raw) {
     return res.status(400).json({ error: "raw log line is required" });
+  }
+  if (!runtimeConfig.ingestLogs) {
+    return res.status(409).json({ error: "log ingestion disabled for this site" });
   }
 
   const match = raw.match(/"(GET|POST|PUT|DELETE|PATCH)\s+([^"\s]+)[^"]*"\s+(\d{3})/i);
@@ -2040,6 +2796,7 @@ app.post("/api/logs/ingest", (req, res) => {
     country: "United States",
     asn: "Imported Log",
     trustLevel: "trusted",
+    sourceType: "ingested_log",
   };
   const signals = detectThreatSignals({ endpoint: requestRecord.endpoint, userAgent: requestRecord.agentName, status: requestRecord.status, ip: "", blocked: false });
   requestRecord.bot = signals.bot;
@@ -2062,6 +2819,13 @@ app.post("/api/collect", (req, res) => {
   }
   if (site.apiKey && site.apiKey !== apiKey) {
     return res.status(403).json({ error: "invalid apiKey" });
+  }
+  const runtimeConfig = getRuntimeConfig(site.siteKey);
+  if (runtimeConfig.trafficMode === "demo_only") {
+    return res.status(409).json({ error: "site is currently set to demo_only mode" });
+  }
+  if (runtimeConfig.sampleRate < 100 && Math.random() * 100 > runtimeConfig.sampleRate) {
+    return res.status(202).json({ ok: true, sampledOut: true });
   }
 
   const endpoint = String(req.body?.path || req.body?.endpoint || "/").trim() || "/";
@@ -2103,6 +2867,7 @@ app.post("/api/collect", (req, res) => {
     siteDomain: site.domain,
     country,
     asn,
+    sourceType: "live_browser",
     trustLevel: classifyTrust({
       bot: threatSignals.bot,
       malicious: threatSignals.malicious,
@@ -2142,6 +2907,7 @@ app.post("/api/collect", (req, res) => {
   return res.status(202).json({
     ok: true,
     site: { siteKey: site.siteKey, name: site.name, domain: site.domain },
+    trafficMode: runtimeConfig.trafficMode,
     classification: {
       bot: requestRecord.bot,
       malicious: requestRecord.malicious,
@@ -2284,6 +3050,10 @@ app.all(DEMO_SIMULATION_ENDPOINTS, (req, res) => {
   const profile = scenarioMap[endpoint] || { okMin: 30, okMax: 220, failMin: 400, failMax: 1200 };
   const agent = pickWeightedAgent();
   const site = state.sites[0] || DEFAULT_SITE;
+  const runtimeConfig = getRuntimeConfig(site.siteKey);
+  if (!runtimeConfig.allowDemo || runtimeConfig.trafficMode === "live_only") {
+    return res.status(204).send();
+  }
   const scenario = getScenarioState();
   const chaosFactor = Date.now() < state.chaosUntil ? 2.4 : 1;
   const botFactor = agent.bot ? scenario.botMultiplier : 1;
@@ -2331,6 +3101,7 @@ app.all(DEMO_SIMULATION_ENDPOINTS, (req, res) => {
     siteDomain: site.domain,
     country: COUNTRY_BY_REGION[region] || "United States",
     asn: pick(ASN_POOL),
+    sourceType: "simulated_demo",
     trustLevel: classifyTrust({
       bot: agent.bot || threatSignals.bot,
       malicious: agent.malicious || threatSignals.malicious,
@@ -2381,4 +3152,24 @@ app.all(DEMO_SIMULATION_ENDPOINTS, (req, res) => {
   }, latency);
 });
 
-app.listen(PORT, () => console.log(`Backend running at http://localhost:${PORT}`));
+app.use((error, req, res, next) => {
+  if (res.headersSent) {
+    return next(error);
+  }
+
+  if (error?.type === "entity.too.large") {
+    return res.status(413).json({ error: "request body too large" });
+  }
+
+  if (error instanceof SyntaxError && "body" in error) {
+    return res.status(400).json({ error: "invalid json body" });
+  }
+
+  console.error("Unhandled backend error:", error?.message || error);
+  return res.status(500).json({ error: "internal server error" });
+});
+
+app.listen(PORT, HOST, () => {
+  console.log(`Backend running at http://${HOST === "0.0.0.0" ? "localhost" : HOST}:${PORT}`);
+  console.log(`Using database at ${DB_PATH}`);
+});
