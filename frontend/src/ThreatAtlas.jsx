@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-
-const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:9000";
+import { API_BASE } from "./config";
 
 export default function ThreatAtlas() {
   const [snapshot, setSnapshot] = useState(null);

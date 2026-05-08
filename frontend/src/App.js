@@ -18,18 +18,20 @@ const SecurityAnalyst = lazy(() => import("./SecurityAnalyst"));
 const AnalyticsHub = lazy(() => import("./AnalyticsHub"));
 const AdminConsole = lazy(() => import("./AdminConsole"));
 const SiteWatch = lazy(() => import("./SiteWatch"));
+const AutomationCenter = lazy(() => import("./AutomationCenter"));
 
 const PAGES = [
-  { id: "command", label: "Command Center", description: "AI-first overview, triage, and live operational posture." },
-  { id: "security", label: "Security Analyst", description: "Threat diagnosis, AI guidance, and response recommendations." },
-  { id: "analytics", label: "Analytics Hub", description: "Historical trends, anomalies, and performance insight." },
-  { id: "sites", label: "Website Monitor", description: "Monitored properties, telemetry ingestion, and site health." },
-  { id: "war-room", label: "War Room", description: "Coordinate incidents, responses, and operational handoffs." },
-  { id: "chat", label: "Chat Workspace", description: "Conversational AI workspace for live operational questions." },
-  { id: "studio", label: "Prompt Studio", description: "Reusable prompts and AI workflow templates." },
-  { id: "executive", label: "Executive Suite", description: "Translate technical signals into business-facing summaries." },
-  { id: "exports", label: "Export Center", description: "Reports, briefing packs, and shareable outputs." },
-  { id: "admin", label: "Admin Console", description: "Users, keys, integrations, and workspace administration." },
+  { id: "command", icon: "01", label: "Command Center", description: "AI-first overview, triage, and live operational posture." },
+  { id: "security", icon: "02", label: "Security Analyst", description: "Threat diagnosis, AI guidance, and response recommendations." },
+  { id: "analytics", icon: "03", label: "Analytics Hub", description: "Historical trends, anomalies, and performance insight." },
+  { id: "sites", icon: "04", label: "Website Monitor", description: "Monitored properties, telemetry ingestion, and site health." },
+  { id: "war-room", icon: "05", label: "War Room", description: "Coordinate incidents, responses, and operational handoffs." },
+  { id: "chat", icon: "06", label: "Chat Workspace", description: "Conversational AI workspace for live operational questions." },
+  { id: "studio", icon: "07", label: "Prompt Studio", description: "Reusable prompts and AI workflow templates." },
+  { id: "automation", icon: "08", label: "Automation Center", description: "Rule-based actions, triggered playbooks, and automated response flows." },
+  { id: "executive", icon: "09", label: "Executive Suite", description: "Translate technical signals into business-facing summaries." },
+  { id: "exports", icon: "10", label: "Export Center", description: "Reports, briefing packs, and shareable outputs." },
+  { id: "admin", icon: "11", label: "Admin Console", description: "Users, keys, integrations, and workspace administration." },
 ];
 
 const SESSION_KEY = "pulseops_session";
@@ -229,7 +231,7 @@ function App() {
       <div className="workspace-shell">
         <aside className="sidebar">
           <div className="sidebar__brand">
-            <div className="topbar__mark" aria-hidden="true">
+            <div className="topbar__mark sidebar__brand-mark" aria-hidden="true">
               <span />
               <span />
               <span />
@@ -237,13 +239,27 @@ function App() {
             </div>
             <div>
               <p className="topbar__eyebrow">PulseOps Workspace</p>
-              <h1>Mission Control</h1>
-              <p className="topbar__subcopy">Navigate every module from one clean operational shell.</p>
+              <h1>Control Suite</h1>
+              <p className="topbar__subcopy">A clean control surface for AI operations, edge monitoring, and final presentations.</p>
+            </div>
+          </div>
+
+          <div className="sidebar__profile-card">
+            <div className="sidebar__profile-top">
+              <div className="topbar__avatar sidebar__avatar">{(session?.name || "P").slice(0, 1).toUpperCase()}</div>
+              <div className="sidebar__profile-copy">
+                <strong>{session?.name || "PulseOps User"}</strong>
+                <span>{session?.role || "Platform Operator"}</span>
+              </div>
+            </div>
+            <div className="sidebar__profile-pills">
+              <span className="sidebar__mini-pill">Live workspace</span>
+              <span className="sidebar__mini-pill">{viewMode === "operator" ? "Operator mode" : "Presentation mode"}</span>
             </div>
           </div>
 
           <div className="sidebar__section">
-            <div className="sidebar__label">Core Workspaces</div>
+            <div className="sidebar__label">Navigation</div>
             <div className="sidebar__nav">
               {PAGES.map((item) => (
                 <button
@@ -252,7 +268,10 @@ function App() {
                   onClick={() => navigateTo(item.id)}
                   type="button"
                 >
-                  <strong>{item.label}</strong>
+                  <div className="sidebar__nav-topline">
+                    <span className="sidebar__nav-icon">{item.icon}</span>
+                    <strong>{item.label}</strong>
+                  </div>
                   <div className="sidebar__nav-copy">{item.description}</div>
                 </button>
               ))}
@@ -310,7 +329,7 @@ function App() {
             </div>
           </header>
 
-          <LiveOpsDock pageLabel={currentPage.label} onNavigate={navigateTo} viewMode={viewMode} />
+          {page === "command" ? <LiveOpsDock pageLabel={currentPage.label} onNavigate={navigateTo} viewMode={viewMode} /> : null}
 
           <ErrorBoundary>
             <Suspense fallback={<PageLoader />}>
@@ -339,6 +358,7 @@ function App() {
               {page === "sites" ? <SiteWatch /> : null}
               {page === "security" ? <SecurityAnalyst /> : null}
               {page === "analytics" ? <AnalyticsHub /> : null}
+              {page === "automation" ? <AutomationCenter /> : null}
               {page === "executive" ? <ExecutiveSuite /> : null}
               {page === "exports" ? <ExportCenter /> : null}
               {page === "admin" ? <AdminConsole /> : null}

@@ -12,6 +12,6 @@ test("renders command center heading", async () => {
   );
   render(<App />);
   expect(await screen.findByRole("heading", { name: /Command Center/i })).toBeInTheDocument();
-  expect(screen.getByText(/Mission Control/i)).toBeInTheDocument();
+  expect(screen.getByText(/Control Suite/i)).toBeInTheDocument();
   expect(screen.getAllByRole("button", { name: /Quick Actions/i }).length).toBeGreaterThan(0);
 });
