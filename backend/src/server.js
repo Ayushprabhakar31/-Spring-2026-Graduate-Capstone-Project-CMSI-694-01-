@@ -933,6 +933,118 @@ function getScenarioState() {
   return SCENARIOS[scenarioKey] || SCENARIOS.normal;
 }
 
+function shouldGenerateBackgroundDemo(site, runtimeConfig) {
+  if (!site || !runtimeConfig) return false;
+  if (!runtimeConfig.allowDemo) return false;
+  if (runtimeConfig.trafficMode === "live_only") return false;
+  if (runtimeConfig.trafficMode === "demo_only") return true;
+
+  const recentRealTraffic = state.requests.some(
+    (request) =>
+      request.siteKey === site.siteKey &&
+      request.sourceType !== "simulated_demo" &&
+      Date.now() - request.ts < 15000,
+  );
+
+  return !recentRealTraffic;
+}
+
+function generateSimulatedDemoRequest(site, endpoint, method = "GET") {
+  const profile = scenarioMap[endpoint] || { okMin: 30, okMax: 220, failMin: 400, failMax: 1200 };
+  const agent = pickWeightedAgent();
+  const scenario = getScenarioState();
+  const chaosFactor = Date.now() < state.chaosUntil ? 2.4 : 1;
+  const botFactor = agent.bot ? scenario.botMultiplier : 1;
+  const focusBoost = scenario.focus === endpoint ? 1.7 : 1;
+  const blocked = agent.malicious && Math.random() < 0.24 * chaosFactor * scenario.botMultiplier;
+  const failing = Math.random() < 0.14 * chaosFactor * scenario.errorMultiplier * focusBoost;
+  const status = failing
+    ? pick([400, 401, 403, 404, 429, 500, 502])
+    : pick([200, 200, 200, 200, 201, 204]);
+  const finalStatus = blocked ? 429 : status;
+  const latencyBase = status >= 500
+    ? randomBetween(profile.failMin, profile.failMax)
+    : status >= 400
+      ? randomBetween(Math.round(profile.okMax * 0.8), profile.failMin)
+      : randomBetween(profile.okMin, profile.okMax);
+  const latency = Math.round(latencyBase * scenario.latencyMultiplier * focusBoost * botFactor);
+  const payloadBytes = randomBetween(250, 9000);
+  const region = pick(regionPool);
+  const threatSignals = detectThreatSignals({
+    endpoint,
+    userAgent: agent.name,
+    status: finalStatus,
+    ip: "",
+    blocked,
+  });
+
+  const requestRecord = {
+    id: crypto.randomUUID(),
+    ts: Date.now(),
+    method,
+    endpoint,
+    status: finalStatus,
+    latency,
+    bytes: payloadBytes,
+    region,
+    trace: `trc_${Math.random().toString(36).slice(2, 10)}`,
+    agentName: agent.name,
+    bot: agent.bot || threatSignals.bot,
+    malicious: agent.malicious || threatSignals.malicious,
+    blocked,
+    illegalAttempt: threatSignals.illegalAttempt,
+    warnings: threatSignals.warnings,
+    siteKey: site.siteKey,
+    siteName: site.name,
+    siteDomain: site.domain,
+    country: COUNTRY_BY_REGION[region] || "United States",
+    asn: pick(ASN_POOL),
+    sourceType: "simulated_demo",
+    trustLevel: classifyTrust({
+      bot: agent.bot || threatSignals.bot,
+      malicious: agent.malicious || threatSignals.malicious,
+      illegalAttempt: threatSignals.illegalAttempt,
+      blocked,
+      status: finalStatus,
+    }),
+  };
+
+  recordRequest(requestRecord);
+
+  if (blocked) {
+    state.rateLimitEvents = [
+      {
+        id: crypto.randomUUID(),
+        ts: requestRecord.ts,
+        agentName: agent.name,
+        endpoint,
+        status: finalStatus,
+        action: "rate-limited",
+        siteName: site.name,
+      },
+      ...state.rateLimitEvents,
+    ].slice(0, 24);
+  }
+
+  if (requestRecord.illegalAttempt || requestRecord.malicious) {
+    logAudit("security.warning", `${site.name}: ${requestRecord.agentName} on ${endpoint}`);
+  }
+
+  return {
+    requestRecord,
+    responseBody: {
+      ok: finalStatus < 400,
+      path: endpoint,
+      method,
+      latency,
+      trace: requestRecord.trace,
+      region: requestRecord.region,
+      agent: agent.name,
+      bot: agent.bot,
+    },
+  };
+}
+
 function buildRegionDistribution(requests) {
   return Object.entries(
     requests.reduce((accumulator, request) => {
@@ -2324,6 +2436,21 @@ function flushMetrics() {
 
 setInterval(flushMetrics, 1000);
 
+setInterval(() => {
+  const site = state.sites[0] || DEFAULT_SITE;
+  const runtimeConfig = getRuntimeConfig(site.siteKey);
+  if (!shouldGenerateBackgroundDemo(site, runtimeConfig)) {
+    return;
+  }
+
+  const burstSize = runtimeConfig.trafficMode === "demo_only" ? 3 : 2;
+  for (let index = 0; index < burstSize; index += 1) {
+    const endpoint = pick(DEMO_SIMULATION_ENDPOINTS);
+    const method = pick(["GET", "GET", "POST", "PUT", "DELETE"]);
+    generateSimulatedDemoRequest(site, endpoint, method);
+  }
+}, 1500);
+
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
@@ -3047,109 +3174,20 @@ app.post("/api/prompt-studio", async (req, res) => {
 
 app.all(DEMO_SIMULATION_ENDPOINTS, (req, res) => {
   const endpoint = req.path;
-  const profile = scenarioMap[endpoint] || { okMin: 30, okMax: 220, failMin: 400, failMax: 1200 };
-  const agent = pickWeightedAgent();
   const site = state.sites[0] || DEFAULT_SITE;
   const runtimeConfig = getRuntimeConfig(site.siteKey);
   if (!runtimeConfig.allowDemo || runtimeConfig.trafficMode === "live_only") {
     return res.status(204).send();
   }
-  const scenario = getScenarioState();
-  const chaosFactor = Date.now() < state.chaosUntil ? 2.4 : 1;
-  const botFactor = agent.bot ? scenario.botMultiplier : 1;
-  const focusBoost = scenario.focus === endpoint ? 1.7 : 1;
-  const blocked = agent.malicious && Math.random() < 0.24 * chaosFactor * scenario.botMultiplier;
-  const failing = Math.random() < 0.14 * chaosFactor * scenario.errorMultiplier * focusBoost;
-  const status = failing
-    ? pick([400, 401, 403, 404, 429, 500, 502])
-    : pick([200, 200, 200, 200, 201, 204]);
-  const finalStatus = blocked ? 429 : status;
-  const latencyBase = status >= 500
-    ? randomBetween(profile.failMin, profile.failMax)
-    : status >= 400
-      ? randomBetween(Math.round(profile.okMax * 0.8), profile.failMin)
-      : randomBetween(profile.okMin, profile.okMax);
-  const latency = Math.round(latencyBase * scenario.latencyMultiplier * focusBoost * botFactor);
-  const payloadBytes = randomBetween(250, 9000);
-  const region = pick(regionPool);
-  const threatSignals = detectThreatSignals({
-    endpoint,
-    userAgent: agent.name,
-    status: finalStatus,
-    ip: "",
-    blocked,
-  });
-
-  const requestRecord = {
-    id: crypto.randomUUID(),
-    ts: Date.now(),
-    method: req.method,
-    endpoint,
-    status: finalStatus,
-    latency,
-    bytes: payloadBytes,
-    region,
-    trace: `trc_${Math.random().toString(36).slice(2, 10)}`,
-    agentName: agent.name,
-    bot: agent.bot || threatSignals.bot,
-    malicious: agent.malicious || threatSignals.malicious,
-    blocked,
-    illegalAttempt: threatSignals.illegalAttempt,
-    warnings: threatSignals.warnings,
-    siteKey: site.siteKey,
-    siteName: site.name,
-    siteDomain: site.domain,
-    country: COUNTRY_BY_REGION[region] || "United States",
-    asn: pick(ASN_POOL),
-    sourceType: "simulated_demo",
-    trustLevel: classifyTrust({
-      bot: agent.bot || threatSignals.bot,
-      malicious: agent.malicious || threatSignals.malicious,
-      illegalAttempt: threatSignals.illegalAttempt,
-      blocked,
-      status: finalStatus,
-    }),
-  };
-
-  recordRequest(requestRecord);
-
-  if (blocked) {
-    state.rateLimitEvents = [
-      {
-        id: crypto.randomUUID(),
-        ts: requestRecord.ts,
-        agentName: agent.name,
-        endpoint,
-        status: finalStatus,
-        action: "rate-limited",
-        siteName: site.name,
-      },
-      ...state.rateLimitEvents,
-    ].slice(0, 24);
-  }
-
-  if (requestRecord.illegalAttempt || requestRecord.malicious) {
-    logAudit("security.warning", `${site.name}: ${requestRecord.agentName} on ${endpoint}`);
-  }
+  const { requestRecord, responseBody } = generateSimulatedDemoRequest(site, endpoint, req.method);
 
   setTimeout(() => {
-    const body = {
-      ok: finalStatus < 400,
-      path: endpoint,
-      method: req.method,
-      latency,
-      trace: requestRecord.trace,
-      region: requestRecord.region,
-      agent: agent.name,
-      bot: agent.bot,
-    };
-
-    if (finalStatus === 204) {
-      return res.status(finalStatus).end();
+    if (requestRecord.status === 204) {
+      return res.status(requestRecord.status).end();
     }
 
-    return res.status(finalStatus).json(body);
-  }, latency);
+    return res.status(requestRecord.status).json(responseBody);
+  }, requestRecord.latency);
 });
 
 app.use((error, req, res, next) => {

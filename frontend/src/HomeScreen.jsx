@@ -11,6 +11,17 @@ function formatTime(ts) {
   }
 }
 
+function formatRelativeUpdate(ts) {
+  if (!ts) return "Waiting for first signal";
+
+  const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (seconds <= 1) return "Updated just now";
+  if (seconds < 60) return `Updated ${seconds}s ago`;
+
+  const minutes = Math.floor(seconds / 60);
+  return `Updated ${minutes}m ago`;
+}
+
 export default function HomeScreen({
   session,
   auditRows,
@@ -23,6 +34,8 @@ export default function HomeScreen({
 }) {
   const [homeData, setHomeData] = useState(null);
   const [streamState, setStreamState] = useState("connecting");
+  const [lastUpdateAt, setLastUpdateAt] = useState(null);
+  const [, setHeartbeatTick] = useState(0);
 
   const todayLabel = useMemo(
     () =>
@@ -46,6 +59,7 @@ export default function HomeScreen({
         if (mounted) {
           setHomeData(data);
           setStreamState("live");
+          setLastUpdateAt(Date.now());
         }
       } catch (error) {
         if (mounted) setStreamState("offline");
@@ -63,6 +77,7 @@ export default function HomeScreen({
         if (!mounted) return;
         setHomeData(JSON.parse(event.data));
         setStreamState("live");
+        setLastUpdateAt(Date.now());
       });
       eventSource.onerror = () => {
         if (mounted) setStreamState("reconnecting");
@@ -75,6 +90,14 @@ export default function HomeScreen({
       mounted = false;
       eventSource?.close();
     };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setHeartbeatTick((value) => value + 1);
+    }, 1000);
+
+    return () => window.clearInterval(timer);
   }, []);
 
   const heroStats = useMemo(
@@ -216,6 +239,7 @@ export default function HomeScreen({
             <div className={`home-live-pill home-live-pill--${streamState === "live" ? "live" : streamState === "reconnecting" ? "warm" : "cold"}`}>
               <span className="home-live-pill__dot" />
               {streamState === "live" ? "Live stream connected" : streamState === "reconnecting" ? "Reconnecting" : "Backend offline"}
+              <em>{formatRelativeUpdate(lastUpdateAt)}</em>
             </div>
           </div>
 
@@ -253,6 +277,10 @@ export default function HomeScreen({
             <div className="home-meta-chip">
               <span>Today</span>
               <strong>{todayLabel}</strong>
+            </div>
+            <div className="home-meta-chip">
+              <span>Live Heartbeat</span>
+              <strong>{formatRelativeUpdate(lastUpdateAt)}</strong>
             </div>
           </div>
         </div>

@@ -13,6 +13,7 @@ export default function ChatWorkspace() {
   const [input, setInput] = useState(STARTERS[0]);
   const [loading, setLoading] = useState(false);
   const { messages, addMessage, clearMessages, bottomRef } = useChat();
+  const hasConversation = messages.length > 1;
 
   const tips = useMemo(
     () => [
@@ -76,7 +77,7 @@ export default function ChatWorkspace() {
             </div>
             <button className="topbar__logout" onClick={clearMessages} type="button">Clear Memory</button>
           </div>
-          <div className="chat-thread chat-workspace__thread">
+          <div className={`chat-thread chat-workspace__thread ${hasConversation ? "" : "chat-workspace__thread--empty"}`}>
             {messages.map((message) => (
               <div
                 key={message.id}
@@ -96,6 +97,26 @@ export default function ChatWorkspace() {
                 ) : null}
               </div>
             ))}
+            {!hasConversation ? (
+              <div className="chat-workspace__empty-state">
+                <div className="chat-workspace__empty-copy">
+                  <strong>Start with one of these high-value questions</strong>
+                  <p>The workspace is ready. Pick a prompt below or type your own question to generate a live explanation.</p>
+                </div>
+                <div className="chat-workspace__empty-actions">
+                  {STARTERS.map((starter) => (
+                    <button
+                      key={`empty-${starter}`}
+                      className="chat-workspace__empty-chip"
+                      onClick={() => setInput(starter)}
+                      type="button"
+                    >
+                      {starter}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             <div ref={bottomRef} />
           </div>
           <form

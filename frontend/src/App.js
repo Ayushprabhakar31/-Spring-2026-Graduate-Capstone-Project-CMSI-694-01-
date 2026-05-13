@@ -127,6 +127,8 @@ function App() {
   function handleAuthenticate(nextSession) {
     persistSession(nextSession);
     setSession(nextSession);
+    markOnboardingSeen();
+    setShowOnboarding(false);
     const rolePageMap = {
       "Security Analyst": "security",
       "Executive Viewer": "executive",

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import * as api from "./services/api";
 import useSites from "./hooks/useSites";
 import { SkeletonCard, SkeletonPanel } from "./components/Skeleton";
+import { API_BASE } from "./config";
 
 export default function AnalyticsHub() {
   const { sites } = useSites();
@@ -13,6 +14,8 @@ export default function AnalyticsHub() {
 
   useEffect(() => {
     let cancelled = false;
+    let eventSource = null;
+    let intervalId = null;
 
     async function loadAnalytics() {
       try {
@@ -36,13 +39,25 @@ export default function AnalyticsHub() {
 
     setLoading(true);
     loadAnalytics().catch(() => {});
-    const intervalId = window.setInterval(() => {
+    intervalId = window.setInterval(() => {
       loadAnalytics().catch(() => {});
-    }, 8000);
+    }, 2000);
+
+    if (typeof EventSource === "function") {
+      try {
+        eventSource = new EventSource(`${API_BASE}/api/metrics/realtime`);
+        eventSource.addEventListener("snapshot", () => {
+          loadAnalytics().catch(() => {});
+        });
+      } catch (error) {
+        // Polling stays active as the fallback path.
+      }
+    }
 
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
+      eventSource?.close();
     };
   }, [siteKey]);
 
